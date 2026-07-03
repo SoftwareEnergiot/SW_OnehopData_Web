@@ -11,6 +11,9 @@ next.user-config.*
 .env*.local
 .env
 
+# Clerk configuration (can include secrets)
+/.clerk/
+
 # Supabase local temp files
 .branches/
 .temp/

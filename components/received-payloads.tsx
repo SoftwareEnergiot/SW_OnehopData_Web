@@ -1,7 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -55,20 +61,22 @@ export function ReceivedPayloads() {
   return (
     <div className="space-y-6">
       <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Database className="h-4 w-4 text-primary" />
             Received payloads
           </CardTitle>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={fetchPayloads}
-            className="gap-2"
-          >
-            <RefreshCw className="h-4 w-4" />
-            Refresh
-          </Button>
+          <CardAction>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={fetchPayloads}
+              className="gap-2"
+            >
+              <RefreshCw className="h-4 w-4" />
+              Refresh
+            </Button>
+          </CardAction>
         </CardHeader>
         <CardContent>
           {loading ? (
