@@ -119,8 +119,9 @@ export async function POST(request: NextRequest) {
 /**
  * GET /api/payloads
  *
- * Lists stored payloads, most recent first. Supports `limit`, `offset`, and an
- * optional `error_mask` filter.
+ * Lists stored payloads, most recent first. Supports `limit`, `offset`, an
+ * optional `error_mask` filter, and an optional received-timestamp range
+ * (`from` / `to`) filter on `created_at`.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -128,6 +129,8 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get("limit") || "50");
     const offset = parseInt(searchParams.get("offset") || "0");
     const errorMask = searchParams.get("error_mask");
+    const from = searchParams.get("from");
+    const to = searchParams.get("to");
 
     const supabase = await createClient();
 
@@ -139,6 +142,18 @@ export async function GET(request: NextRequest) {
 
     if (errorMask !== null && errorMask !== "") {
       query = query.eq("error_mask", Number(errorMask));
+    }
+
+    // Received-timestamp range filter. Accepts any value Date can parse (e.g.
+    // an ISO 8601 string); invalid values are ignored rather than erroring.
+    const fromDate = from ? new Date(from) : null;
+    if (fromDate && !Number.isNaN(fromDate.getTime())) {
+      query = query.gte("created_at", fromDate.toISOString());
+    }
+
+    const toDate = to ? new Date(to) : null;
+    if (toDate && !Number.isNaN(toDate.getTime())) {
+      query = query.lte("created_at", toDate.toISOString());
     }
 
     const { data, error, count } = await query;

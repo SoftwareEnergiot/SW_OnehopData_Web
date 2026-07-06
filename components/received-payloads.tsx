@@ -10,6 +10,8 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -23,17 +25,32 @@ import { analyzePayload, hexToBytes } from "@/lib/payload-decoder";
 import { formatErrorMask } from "@/lib/payload-errors";
 import type { PayloadRecord } from "@/lib/types";
 import { toast } from "sonner";
-import { Database, RefreshCw } from "lucide-react";
+import { Database, RefreshCw, X } from "lucide-react";
 
 export function ReceivedPayloads() {
   const [rows, setRows] = useState<PayloadRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<PayloadRecord | null>(null);
+  // Received-timestamp range filter. Values come from <input type="datetime-local">,
+  // i.e. local wall-clock strings like "2026-07-06T14:30" (no timezone).
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
 
   const fetchPayloads = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await fetch("/api/payloads?limit=50", {
+      const params = new URLSearchParams({ limit: "50" });
+      // Convert the local datetime-local value to an ISO instant so the range
+      // is interpreted in the user's timezone, matching what the table shows.
+      if (from) {
+        const d = new Date(from);
+        if (!Number.isNaN(d.getTime())) params.set("from", d.toISOString());
+      }
+      if (to) {
+        const d = new Date(to);
+        if (!Number.isNaN(d.getTime())) params.set("to", d.toISOString());
+      }
+      const response = await fetch(`/api/payloads?${params.toString()}`, {
         cache: "no-store",
       });
       const result = await response.json();
@@ -48,11 +65,18 @@ export function ReceivedPayloads() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [from, to]);
 
   useEffect(() => {
     fetchPayloads();
   }, [fetchPayloads]);
+
+  const clearFilter = useCallback(() => {
+    setFrom("");
+    setTo("");
+  }, []);
+
+  const hasFilter = from !== "" || to !== "";
 
   const selectedAnalysis = selected
     ? safeAnalyze(selected.payload_hex)
@@ -78,17 +102,62 @@ export function ReceivedPayloads() {
             </Button>
           </CardAction>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="grid gap-1.5">
+              <Label htmlFor="received-from" className="text-xs text-muted-foreground">
+                Received from
+              </Label>
+              <Input
+                id="received-from"
+                type="datetime-local"
+                value={from}
+                max={to || undefined}
+                onChange={(e) => setFrom(e.target.value)}
+                className="w-auto"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="received-to" className="text-xs text-muted-foreground">
+                Received to
+              </Label>
+              <Input
+                id="received-to"
+                type="datetime-local"
+                value={to}
+                min={from || undefined}
+                onChange={(e) => setTo(e.target.value)}
+                className="w-auto"
+              />
+            </div>
+            {hasFilter && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearFilter}
+                className="gap-2"
+              >
+                <X className="h-4 w-4" />
+                Clear
+              </Button>
+            )}
+          </div>
           {loading ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Loading…
             </p>
           ) : rows.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              No payloads stored yet. Send one to{" "}
-              <span className="font-mono">POST /api/payloads</span> or use the
-              Playground.
-            </p>
+            hasFilter ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                No payloads received in the selected time range.
+              </p>
+            ) : (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                No payloads stored yet. Send one to{" "}
+                <span className="font-mono">POST /api/payloads</span> or use the
+                Playground.
+              </p>
+            )
           ) : (
             <Table>
               <TableHeader>

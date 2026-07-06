@@ -205,11 +205,16 @@ const analysis = await res.json();
 Lists stored payloads, most recent first. Also public (no auth). Query
 parameters:
 
-| Param        | Type     | Default | Description                                   |
-| ------------ | -------- | ------- | --------------------------------------------- |
-| `limit`      | `number` | `50`    | Page size.                                    |
-| `offset`     | `number` | `0`     | Rows to skip.                                 |
-| `error_mask` | `number` | —       | Optional exact-match filter on `error_mask`.  |
+| Param        | Type     | Default | Description                                                            |
+| ------------ | -------- | ------- | ---------------------------------------------------------------------- |
+| `limit`      | `number` | `50`    | Page size.                                                             |
+| `offset`     | `number` | `0`     | Rows to skip.                                                          |
+| `error_mask` | `number` | —       | Optional exact-match filter on `error_mask`.                          |
+| `from`       | `string` | —       | Optional lower bound on the received timestamp (`created_at`, inclusive). Any `Date`-parseable value, e.g. an ISO 8601 instant. |
+| `to`         | `string` | —       | Optional upper bound on the received timestamp (`created_at`, inclusive). Any `Date`-parseable value, e.g. an ISO 8601 instant. |
+
+Unparseable `from` / `to` values are ignored rather than erroring. Example:
+`GET /api/payloads?from=2026-07-01T00:00:00Z&to=2026-07-06T23:59:59Z`.
 
 Response: `{ success, data: PayloadRecord[], total, limit, offset }`.
 ```
