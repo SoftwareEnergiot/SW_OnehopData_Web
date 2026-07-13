@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Card,
   CardAction,
@@ -23,39 +23,58 @@ import {
 import { PayloadAnalysisView } from "@/components/payload-analysis";
 import { analyzePayload, hexToBytes } from "@/lib/payload-decoder";
 import { formatErrorMask } from "@/lib/payload-errors";
+import { createdAtBoundFromInput, formatCreatedAt } from "@/lib/utils";
 import type { PayloadRecord } from "@/lib/types";
 import { toast } from "sonner";
-import { Database, RefreshCw, X } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Database,
+  RefreshCw,
+  X,
+} from "lucide-react";
+
+const PAGE_SIZES = [25, 50, 100, 200];
 
 export function ReceivedPayloads() {
   const [rows, setRows] = useState<PayloadRecord[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<PayloadRecord | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   // Received-timestamp range filter. Values come from <input type="datetime-local">,
-  // i.e. local wall-clock strings like "2026-07-06T14:30" (no timezone).
+  // i.e. wall-clock strings like "2026-07-06T14:30", read on the same clock as
+  // the created_at values shown in the table.
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  // Paging through every stored payload in the selected range.
+  const [pageSize, setPageSize] = useState(50);
+  const [page, setPage] = useState(0);
+  // Set when the inspector steps past the edge of the current page: once the
+  // next page has loaded, select its first ("first") or last ("last") row so
+  // navigation continues seamlessly across the whole range.
+  const [selectEdge, setSelectEdge] = useState<"first" | "last" | null>(null);
 
   const fetchPayloads = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: "50" });
-      // Convert the local datetime-local value to an ISO instant so the range
-      // is interpreted in the user's timezone, matching what the table shows.
-      if (from) {
-        const d = new Date(from);
-        if (!Number.isNaN(d.getTime())) params.set("from", d.toISOString());
-      }
-      if (to) {
-        const d = new Date(to);
-        if (!Number.isNaN(d.getTime())) params.set("to", d.toISOString());
-      }
+      const params = new URLSearchParams({
+        limit: String(pageSize),
+        offset: String(page * pageSize),
+      });
+      const fromBound = createdAtBoundFromInput(from);
+      if (fromBound) params.set("from", fromBound);
+      const toBound = createdAtBoundFromInput(to);
+      if (toBound) params.set("to", toBound);
+
       const response = await fetch(`/api/payloads?${params.toString()}`, {
         cache: "no-store",
       });
       const result = await response.json();
       if (result.success) {
         setRows(result.data ?? []);
+        setTotal(result.total ?? 0);
       } else {
         toast.error(result.error ?? "Failed to load payloads");
       }
@@ -65,22 +84,80 @@ export function ReceivedPayloads() {
     } finally {
       setLoading(false);
     }
-  }, [from, to]);
+  }, [from, to, page, pageSize]);
 
   useEffect(() => {
     fetchPayloads();
   }, [fetchPayloads]);
 
+  // Land on the requested edge of a page the inspector just navigated into.
+  useEffect(() => {
+    if (!selectEdge || rows.length === 0) return;
+    const row = selectEdge === "first" ? rows[0] : rows[rows.length - 1];
+    setSelectedId(row.id);
+    setSelectEdge(null);
+  }, [rows, selectEdge]);
+
+  // Any change to the range or the page size restarts paging from the first
+  // page, so the offset can never point past the new result set.
+  const changeFrom = useCallback((value: string) => {
+    setFrom(value);
+    setPage(0);
+  }, []);
+
+  const changeTo = useCallback((value: string) => {
+    setTo(value);
+    setPage(0);
+  }, []);
+
+  const changePageSize = useCallback((value: number) => {
+    setPageSize(value);
+    setPage(0);
+  }, []);
+
   const clearFilter = useCallback(() => {
     setFrom("");
     setTo("");
+    setPage(0);
   }, []);
 
   const hasFilter = from !== "" || to !== "";
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const firstRowNumber = total === 0 ? 0 : page * pageSize + 1;
+  const lastRowNumber = page * pageSize + rows.length;
 
-  const selectedAnalysis = selected
-    ? safeAnalyze(selected.payload_hex)
-    : null;
+  const selectedIndex = rows.findIndex((row) => row.id === selectedId);
+  const selected = selectedIndex === -1 ? null : rows[selectedIndex];
+
+  const selectedAnalysis = useMemo(
+    () => (selected ? safeAnalyze(selected.payload_hex) : null),
+    [selected],
+  );
+
+  // Position of the selection among *all* payloads in the range, not just the
+  // rows of the current page.
+  const selectedNumber = page * pageSize + selectedIndex + 1;
+  const hasNewer = selectedIndex > 0 || page > 0;
+  const hasOlder = selectedNumber < total;
+
+  // Step through the payloads one at a time, crossing page boundaries so the
+  // inspector can walk every stored payload in the range.
+  const stepSelection = useCallback(
+    (delta: 1 | -1) => {
+      if (selectedIndex === -1) return;
+      const next = rows[selectedIndex + delta];
+      if (next) {
+        setSelectedId(next.id);
+      } else if (delta === 1 && page < pageCount - 1) {
+        setSelectEdge("first");
+        setPage((p) => p + 1);
+      } else if (delta === -1 && page > 0) {
+        setSelectEdge("last");
+        setPage((p) => p - 1);
+      }
+    },
+    [rows, selectedIndex, page, pageCount],
+  );
 
   return (
     <div className="space-y-6">
@@ -113,7 +190,7 @@ export function ReceivedPayloads() {
                 type="datetime-local"
                 value={from}
                 max={to || undefined}
-                onChange={(e) => setFrom(e.target.value)}
+                onChange={(e) => changeFrom(e.target.value)}
                 className="w-auto"
               />
             </div>
@@ -126,7 +203,7 @@ export function ReceivedPayloads() {
                 type="datetime-local"
                 value={to}
                 min={from || undefined}
-                onChange={(e) => setTo(e.target.value)}
+                onChange={(e) => changeTo(e.target.value)}
                 className="w-auto"
               />
             </div>
@@ -141,6 +218,26 @@ export function ReceivedPayloads() {
                 Clear
               </Button>
             )}
+            <div className="grid gap-1.5">
+              <Label
+                htmlFor="page-size"
+                className="text-xs text-muted-foreground"
+              >
+                Per page
+              </Label>
+              <select
+                id="page-size"
+                value={pageSize}
+                onChange={(e) => changePageSize(Number(e.target.value))}
+                className="h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              >
+                {PAGE_SIZES.map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
           {loading ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
@@ -159,63 +256,181 @@ export function ReceivedPayloads() {
               </p>
             )
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Received</TableHead>
-                  <TableHead className="text-right">Ver.</TableHead>
-                  <TableHead className="text-right">Samples</TableHead>
-                  <TableHead>Error mask</TableHead>
-                  <TableHead className="text-right">Counter</TableHead>
-                  <TableHead className="text-right">Bytes</TableHead>
-                  <TableHead />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((row) => (
-                  <TableRow key={row.id}>
-                    <TableCell className="font-mono text-xs">
-                      {new Date(row.created_at).toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-right font-mono">
-                      {row.payload_version}
-                    </TableCell>
-                    <TableCell className="text-right font-mono">
-                      {row.sample_count}
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={row.error_mask === 0 ? "secondary" : "destructive"}
-                      >
-                        {formatErrorMask(row.error_mask)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right font-mono">
-                      {row.reporting_counter}
-                    </TableCell>
-                    <TableCell className="text-right font-mono">
-                      {row.byte_length}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          setSelected((prev) => (prev?.id === row.id ? null : row))
-                        }
-                      >
-                        {selected?.id === row.id ? "Hide" : "Inspect"}
-                      </Button>
-                    </TableCell>
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Received</TableHead>
+                    <TableHead className="text-right">Ver.</TableHead>
+                    <TableHead className="text-right">Samples</TableHead>
+                    <TableHead>Error mask</TableHead>
+                    <TableHead className="text-right">Counter</TableHead>
+                    <TableHead className="text-right">Bytes</TableHead>
+                    <TableHead />
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((row) => (
+                    <TableRow
+                      key={row.id}
+                      data-state={row.id === selectedId ? "selected" : undefined}
+                    >
+                      <TableCell className="font-mono text-xs">
+                        {formatCreatedAt(row.created_at)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {row.payload_version}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {row.sample_count}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            row.error_mask === 0 ? "secondary" : "destructive"
+                          }
+                        >
+                          {formatErrorMask(row.error_mask)}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {row.reporting_counter}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {row.byte_length}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            setSelectedId((prev) =>
+                              prev === row.id ? null : row.id,
+                            )
+                          }
+                        >
+                          {selectedId === row.id ? "Hide" : "Inspect"}
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-muted-foreground">
+                  Showing{" "}
+                  <span className="font-mono">
+                    {firstRowNumber}–{lastRowNumber}
+                  </span>{" "}
+                  of <span className="font-mono">{total}</span> payload(s)
+                  {hasFilter ? " in the selected time range" : ""} · page{" "}
+                  <span className="font-mono">{page + 1}</span> of{" "}
+                  <span className="font-mono">{pageCount}</span>
+                </p>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage(0)}
+                    disabled={page === 0}
+                    aria-label="First page"
+                  >
+                    <ChevronsLeft className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage((p) => Math.max(0, p - 1))}
+                    disabled={page === 0}
+                    className="gap-1"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    Previous
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setPage((p) => Math.min(pageCount - 1, p + 1))
+                    }
+                    disabled={page >= pageCount - 1}
+                    className="gap-1"
+                  >
+                    Next
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage(pageCount - 1)}
+                    disabled={page >= pageCount - 1}
+                    aria-label="Last page"
+                  >
+                    <ChevronsRight className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
 
-      {selectedAnalysis && <PayloadAnalysisView analysis={selectedAnalysis} />}
+      {selected && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Database className="h-4 w-4 text-primary" />
+              Payload {formatCreatedAt(selected.created_at)}
+            </CardTitle>
+            <CardAction>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  <span className="font-mono">{selectedNumber}</span> of{" "}
+                  <span className="font-mono">{total}</span>
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => stepSelection(-1)}
+                  disabled={!hasNewer || loading}
+                  className="gap-1"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  Newer
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => stepSelection(1)}
+                  disabled={!hasOlder || loading}
+                  className="gap-1"
+                >
+                  Older
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedId(null)}
+                  aria-label="Close inspector"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            </CardAction>
+          </CardHeader>
+          <CardContent>
+            {selectedAnalysis ? (
+              <PayloadAnalysisView analysis={selectedAnalysis} />
+            ) : (
+              <p className="py-4 text-center text-sm text-muted-foreground">
+                This payload could not be decoded from its stored hex.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

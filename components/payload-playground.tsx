@@ -62,17 +62,13 @@ export function PayloadPlayground() {
         headers: { "Content-Type": "application/octet-stream" },
         body: bytes,
       });
-      const result = await response.json();
-      if (result.success) {
-        toast.success(
-          result.stored
-            ? "Payload decoded and stored in Supabase"
-            : "Payload decoded (storage skipped — Supabase not configured)",
-        );
-        // Reflect the server's decoded response by re-running the local decode.
+      // The endpoint answers with a status only — no body to read. The decoded
+      // view below comes from decoding the same bytes locally.
+      if (response.ok) {
+        toast.success(`Payload accepted (HTTP ${response.status})`);
         decodeLocally();
       } else {
-        toast.error(`${result.code ?? "ERROR"}: ${result.error}`);
+        toast.error(`Endpoint rejected the payload (HTTP ${response.status})`);
       }
     } catch (error) {
       toast.error(

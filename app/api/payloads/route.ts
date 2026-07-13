@@ -1,6 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
 import { analyzePayload, PayloadDecodeError } from "@/lib/payload-decoder";
-import type { PayloadIngestResponse } from "@/lib/types";
 import { NextRequest, NextResponse } from "next/server";
 
 // Raw binary bodies require the Node.js runtime (not the Edge runtime) so the
@@ -17,9 +16,12 @@ function statusForDecodeError(code: string): number {
  * POST /api/payloads
  *
  * Receives a raw binary LoRaWAN V0 payload (preferably
- * `Content-Type: application/octet-stream`), decodes it, stores it in Supabase
- * (best-effort — a storage failure does not fail the decode), and returns the
- * full analysis (metadata, hex, binary, header, samples, context, errors).
+ * `Content-Type: application/octet-stream`), decodes it and stores it in
+ * Supabase (best-effort — a storage failure does not fail the decode).
+ *
+ * The response carries no body: the outcome is the HTTP status alone
+ * (204 accepted, 4xx decode failure, 500 unexpected error). Decoded data is
+ * read back through GET /api/payloads.
  *
  * The body is read with request.arrayBuffer() — it is never parsed as JSON.
  */
@@ -33,10 +35,10 @@ export async function POST(request: NextRequest) {
       analysis = analyzePayload(bytes);
     } catch (error) {
       if (error instanceof PayloadDecodeError) {
-        return NextResponse.json(
-          { success: false, error: error.message, code: error.code },
-          { status: statusForDecodeError(error.code) },
-        );
+        console.error("Payload decode error:", error.code, error.message);
+        return new NextResponse(null, {
+          status: statusForDecodeError(error.code),
+        });
       }
       throw error;
     }
@@ -44,12 +46,11 @@ export async function POST(request: NextRequest) {
     const { decoded } = analysis;
 
     // Best-effort persistence. When Supabase is not configured (or the insert
-    // is rejected) we still return the decoded result with `stored: false`.
-    let storedId: string | null = null;
-    let stored = false;
+    // is rejected) the payload still decoded successfully, so the request is
+    // still accepted.
     try {
       const supabase = await createClient();
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from("payloads")
         .insert({
           payload_hex: analysis.hex,
@@ -66,15 +67,10 @@ export async function POST(request: NextRequest) {
             request.headers.get("x-forwarded-for") ||
             request.headers.get("x-real-ip"),
           source_user_agent: request.headers.get("user-agent"),
-        })
-        .select("id")
-        .single();
+        });
 
       if (error) {
         console.error("Database error storing payload:", error.message);
-      } else {
-        storedId = data?.id ?? null;
-        stored = true;
       }
     } catch (error) {
       console.error(
@@ -83,36 +79,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const body: PayloadIngestResponse = {
-      success: true,
-      stored,
-      id: storedId,
-      meta: analysis.meta,
-      hex: analysis.hex,
-      binary: analysis.binary,
-      header: {
-        payload_version: decoded.payload_version,
-        sample_count: decoded.sample_count,
-      },
-      samples: decoded.samples,
-      context: decoded.context,
-      error_mask: decoded.error_mask,
-      error_mask_hex: decoded.error_mask_hex,
-      reporting_counter: decoded.reporting_counter,
-      errors: decoded.errors,
-    };
-
-    return NextResponse.json(body);
+    return new NextResponse(null, { status: 204 });
   } catch (error) {
     console.error("Error processing payload:", error);
-    return NextResponse.json(
-      {
-        success: false,
-        error: "Failed to process payload",
-        details: error instanceof Error ? error.message : "Unknown error",
-      },
-      { status: 500 },
-    );
+    return new NextResponse(null, { status: 500 });
   }
 }
 
