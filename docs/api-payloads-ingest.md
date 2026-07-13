@@ -182,8 +182,9 @@ Response: `{ success, data: PayloadRecord[], total, limit, offset }` — `total`
 the full count matching the filter (ignoring `limit`/`offset`), which is what the
 dashboard uses to page through the range.
 
-`created_at` is returned as stored (UTC). The dashboard renders those clock
-fields verbatim — it applies **no** timezone conversion — so the times on screen
-always match the `created_at` column, and the `from` / `to` filter is read on the
-same clock.
+`created_at` is returned as stored (UTC). The dashboard converts it to Madrid
+local time (`Europe/Madrid`, CET/CEST) for display — table stamps, chart axes and
+tooltips all read on that clock, with no offset shown — and the `from` / `to`
+filter inputs are read as Madrid local time and sent to the API as UTC instants,
+so the range selects exactly the rows shown.
 ```

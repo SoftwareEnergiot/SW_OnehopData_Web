@@ -329,9 +329,15 @@ describe("median", () => {
 });
 
 describe("formatTimestamp", () => {
-  it("formats on the UTC clock, matching created_at as stored", () => {
+  it("formats on the Madrid clock in summer (CEST, UTC+2)", () => {
     expect(formatTimestamp(Date.parse("2026-07-13T07:24:19Z"))).toBe(
-      "2026-07-13 07:24:19",
+      "2026-07-13 09:24:19",
+    );
+  });
+
+  it("formats on the Madrid clock in winter (CET, UTC+1)", () => {
+    expect(formatTimestamp(Date.parse("2026-01-13T23:24:19Z"))).toBe(
+      "2026-01-14 00:24:19",
     );
   });
 });

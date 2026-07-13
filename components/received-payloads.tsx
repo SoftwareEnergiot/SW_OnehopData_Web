@@ -61,8 +61,8 @@ export function ReceivedPayloads() {
 
   // The range as ISO instants — the one slice both the charts and the table
   // are drawn from, so their numbers always agree.
-  const fromBound = createdAtBoundFromInput(from);
-  const toBound = createdAtBoundFromInput(to);
+  const fromBound = createdAtBoundFromInput(from, "from");
+  const toBound = createdAtBoundFromInput(to, "to");
 
   const fetchPayloads = useCallback(async () => {
     setLoading(true);
@@ -71,9 +71,9 @@ export function ReceivedPayloads() {
         limit: String(pageSize),
         offset: String(page * pageSize),
       });
-      const fromBound = createdAtBoundFromInput(from);
+      const fromBound = createdAtBoundFromInput(from, "from");
       if (fromBound) params.set("from", fromBound);
-      const toBound = createdAtBoundFromInput(to);
+      const toBound = createdAtBoundFromInput(to, "to");
       if (toBound) params.set("to", toBound);
 
       const response = await fetch(`/api/payloads?${params.toString()}`, {

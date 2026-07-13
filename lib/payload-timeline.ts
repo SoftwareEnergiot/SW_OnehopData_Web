@@ -2,6 +2,8 @@
 // GET /api/payloads/summary into the evenly-spaced buckets the charts plot.
 // Kept free of React/DOM so they can be unit-tested directly.
 
+import { toDisplayClock } from "@/lib/timezone";
+
 export interface SummaryPoint {
   created_at: string;
   byte_length: number;
@@ -64,9 +66,9 @@ export const MAX_BUCKETS = 1500;
 /**
  * Bucket payloads into fixed-width time slices (hourly by default).
  *
- * Buckets are aligned to the clock — an hourly bucket starts on the hour (UTC,
- * the clock `created_at` is stored on) rather than at an arbitrary offset — so
- * "payloads this hour" means an actual hour.
+ * Buckets are aligned to the clock — an hourly bucket starts on the hour, and a
+ * daily one at Madrid midnight (the clock the dashboard is read on) rather than
+ * at an arbitrary offset — so "payloads this hour" means an actual hour.
  *
  * The domain is the filter range when one is set (an empty stretch at either
  * end still shows as a gap in reception rather than being cropped away) and
@@ -100,7 +102,9 @@ export function buildTimeline(
   // Snap the domain outward onto bucket boundaries so every bucket is a whole
   // clock interval (a real hour, not 07:23 → 08:23).
   const width = Math.max(1, bucketMs);
-  let start = Math.floor(lo / width) * width;
+  // Snap on the Madrid clock, so a day bucket runs Madrid midnight to midnight.
+  const offset = toDisplayClock(lo) - lo;
+  let start = Math.floor((lo + offset) / width) * width - offset;
   // The bucket *containing* the upper bound is always included, so a payload
   // landing exactly on it (the `to` filter is inclusive) still plots. The
   // domain is never padded past the filter: an hour-wide range at the hourly
@@ -256,11 +260,11 @@ export function median(values: number[]): number {
 }
 
 /**
- * Format an epoch as a UTC wall clock — the same clock `created_at` is stored
- * and displayed on, so axis labels never disagree with the table.
+ * Format an epoch as a Madrid wall clock — the same clock the table is rendered
+ * on, so axis labels never disagree with it.
  */
 export function formatTimeTick(ms: number, spanMs: number): string {
-  const d = new Date(ms);
+  const d = new Date(toDisplayClock(ms));
   const p2 = (n: number) => String(n).padStart(2, "0");
   const day = `${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`;
   const time = `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}`;
@@ -269,9 +273,9 @@ export function formatTimeTick(ms: number, spanMs: number): string {
   return spanMs > 24 * 3600_000 ? `${day} ${time}` : time;
 }
 
-/** Full UTC stamp for tooltips and the table view. */
+/** Full Madrid-clock stamp for tooltips and the table view. */
 export function formatTimestamp(ms: number): string {
-  const d = new Date(ms);
+  const d = new Date(toDisplayClock(ms));
   const p2 = (n: number) => String(n).padStart(2, "0");
   return (
     `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())} ` +
