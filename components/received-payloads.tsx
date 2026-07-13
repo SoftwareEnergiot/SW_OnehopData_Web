@@ -21,6 +21,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PayloadAnalysisView } from "@/components/payload-analysis";
+import { PayloadCharts } from "@/components/payload-charts";
 import { analyzePayload, hexToBytes } from "@/lib/payload-decoder";
 import { formatErrorMask } from "@/lib/payload-errors";
 import { createdAtBoundFromInput, formatCreatedAt } from "@/lib/utils";
@@ -55,6 +56,13 @@ export function ReceivedPayloads() {
   // next page has loaded, select its first ("first") or last ("last") row so
   // navigation continues seamlessly across the whole range.
   const [selectEdge, setSelectEdge] = useState<"first" | "last" | null>(null);
+  // Bumped by Refresh so the charts refetch alongside the table.
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // The range as ISO instants — the one slice both the charts and the table
+  // are drawn from, so their numbers always agree.
+  const fromBound = createdAtBoundFromInput(from);
+  const toBound = createdAtBoundFromInput(to);
 
   const fetchPayloads = useCallback(async () => {
     setLoading(true);
@@ -161,6 +169,68 @@ export function ReceivedPayloads() {
 
   return (
     <div className="space-y-6">
+      {/* One filter row, above everything it scopes: the charts and the table
+          are drawn from the same slice, so their numbers always agree. */}
+      <Card>
+        <CardContent className="flex flex-wrap items-end gap-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="received-from" className="text-xs text-muted-foreground">
+              Received from
+            </Label>
+            <Input
+              id="received-from"
+              type="datetime-local"
+              value={from}
+              max={to || undefined}
+              onChange={(e) => changeFrom(e.target.value)}
+              className="w-auto"
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="received-to" className="text-xs text-muted-foreground">
+              Received to
+            </Label>
+            <Input
+              id="received-to"
+              type="datetime-local"
+              value={to}
+              min={from || undefined}
+              onChange={(e) => changeTo(e.target.value)}
+              className="w-auto"
+            />
+          </div>
+          {hasFilter && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={clearFilter}
+              className="gap-2"
+            >
+              <X className="h-4 w-4" />
+              Clear
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              fetchPayloads();
+              setRefreshKey((k) => k + 1);
+            }}
+            className="ml-auto gap-2"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Refresh
+          </Button>
+        </CardContent>
+      </Card>
+
+      <PayloadCharts
+        from={fromBound}
+        to={toBound}
+        refreshKey={refreshKey}
+      />
+
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -168,57 +238,7 @@ export function ReceivedPayloads() {
             Received payloads
           </CardTitle>
           <CardAction>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={fetchPayloads}
-              className="gap-2"
-            >
-              <RefreshCw className="h-4 w-4" />
-              Refresh
-            </Button>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="grid gap-1.5">
-              <Label htmlFor="received-from" className="text-xs text-muted-foreground">
-                Received from
-              </Label>
-              <Input
-                id="received-from"
-                type="datetime-local"
-                value={from}
-                max={to || undefined}
-                onChange={(e) => changeFrom(e.target.value)}
-                className="w-auto"
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="received-to" className="text-xs text-muted-foreground">
-                Received to
-              </Label>
-              <Input
-                id="received-to"
-                type="datetime-local"
-                value={to}
-                min={from || undefined}
-                onChange={(e) => changeTo(e.target.value)}
-                className="w-auto"
-              />
-            </div>
-            {hasFilter && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={clearFilter}
-                className="gap-2"
-              >
-                <X className="h-4 w-4" />
-                Clear
-              </Button>
-            )}
-            <div className="grid gap-1.5">
+            <div className="flex items-center gap-2">
               <Label
                 htmlFor="page-size"
                 className="text-xs text-muted-foreground"
@@ -238,7 +258,9 @@ export function ReceivedPayloads() {
                 ))}
               </select>
             </div>
-          </div>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="space-y-4">
           {loading ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Loading…
