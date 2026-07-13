@@ -5,6 +5,7 @@
 export interface SummaryPoint {
   created_at: string;
   byte_length: number;
+  reporting_counter: number;
 }
 
 export interface TimelineBucket {
@@ -18,6 +19,11 @@ export interface TimelineBucket {
   minBytes: number | null;
   maxBytes: number | null;
   meanBytes: number | null;
+  /** Reporting-counter stats, null when the bucket received nothing. */
+  minCounter: number | null;
+  maxCounter: number | null;
+  /** Counter of the last payload in the bucket — the series the chart plots. */
+  lastCounter: number | null;
 }
 
 export interface Timeline {
@@ -30,33 +36,55 @@ export interface Timeline {
   total: number;
   minBytes: number | null;
   maxBytes: number | null;
+  minCounter: number | null;
+  maxCounter: number | null;
+  firstCounter: number | null;
+  lastCounter: number | null;
+  /** Times the counter went backwards between consecutive payloads (a reset). */
+  counterResets: number;
+  /**
+   * True when the range needed more than MAX_BUCKETS buckets at this interval,
+   * so only the most recent MAX_BUCKETS are plotted.
+   */
+  clamped: boolean;
 }
 
 interface TimelineOptions {
   /** Explicit domain bounds (epoch ms) from the range filter, when set. */
   from?: number | null;
   to?: number | null;
-  bucketCount: number;
+  /** Width of one bucket, e.g. 3_600_000 for hourly. */
+  bucketMs: number;
 }
 
-// A domain narrower than this is widened so a single payload still plots on a
-// readable axis instead of a zero-width one.
-const MIN_DOMAIN_MS = 60_000;
+// Ceiling on how many buckets a range may be cut into, so a narrow bucket over
+// a wide range cannot produce tens of thousands of marks.
+export const MAX_BUCKETS = 1500;
 
 /**
- * Bucket payloads into `bucketCount` equal time slices.
+ * Bucket payloads into fixed-width time slices (hourly by default).
  *
- * The domain is the filter range when one is set — so an empty stretch at
- * either end of the selected range still shows as a gap in reception rather
- * than being cropped away — and otherwise spans the payloads themselves.
- * Buckets that received nothing keep `count: 0` and null byte stats.
+ * Buckets are aligned to the clock — an hourly bucket starts on the hour (UTC,
+ * the clock `created_at` is stored on) rather than at an arbitrary offset — so
+ * "payloads this hour" means an actual hour.
+ *
+ * The domain is the filter range when one is set (an empty stretch at either
+ * end still shows as a gap in reception rather than being cropped away) and
+ * otherwise spans the payloads themselves. Buckets that received nothing keep
+ * `count: 0` and null stats.
+ *
+ * Returns null when there is nothing to plot.
  */
 export function buildTimeline(
   points: SummaryPoint[],
-  { from, to, bucketCount }: TimelineOptions,
+  { from, to, bucketMs }: TimelineOptions,
 ): Timeline | null {
   const parsed = points
-    .map((p) => ({ t: Date.parse(p.created_at), bytes: p.byte_length }))
+    .map((p) => ({
+      t: Date.parse(p.created_at),
+      bytes: p.byte_length,
+      counter: p.reporting_counter,
+    }))
     .filter((p) => Number.isFinite(p.t))
     .sort((a, b) => a.t - b.t);
 
@@ -65,34 +93,53 @@ export function buildTimeline(
 
   if (parsed.length === 0 && !(hasFrom && hasTo)) return null;
 
-  let start = hasFrom ? (from as number) : parsed[0].t;
-  let end = hasTo ? (to as number) : parsed[parsed.length - 1].t;
+  let lo = hasFrom ? (from as number) : parsed[0].t;
+  let hi = hasTo ? (to as number) : parsed[parsed.length - 1].t;
+  if (hi < lo) [lo, hi] = [hi, lo];
 
-  if (end < start) [start, end] = [end, start];
-  if (end - start < MIN_DOMAIN_MS) {
-    const pad = (MIN_DOMAIN_MS - (end - start)) / 2;
-    start -= pad;
-    end += pad;
+  // Snap the domain outward onto bucket boundaries so every bucket is a whole
+  // clock interval (a real hour, not 07:23 → 08:23).
+  const width = Math.max(1, bucketMs);
+  let start = Math.floor(lo / width) * width;
+  // The bucket *containing* the upper bound is always included, so a payload
+  // landing exactly on it (the `to` filter is inclusive) still plots. The
+  // domain is never padded past the filter: an hour-wide range at the hourly
+  // interval is exactly one bucket, not two with a fabricated empty hour.
+  let n = Math.max(1, Math.floor((hi - start) / width) + 1);
+
+  // Too many buckets to plot (e.g. a fortnight at one-minute resolution): keep
+  // the *most recent* window rather than the oldest — on a live feed the tail
+  // is what the reader came for. The caller surfaces `clamped` to say so.
+  const clamped = n > MAX_BUCKETS;
+  if (clamped) {
+    start += (n - MAX_BUCKETS) * width;
+    n = MAX_BUCKETS;
   }
-
-  const n = Math.max(1, Math.floor(bucketCount));
-  const bucketMs = (end - start) / n;
+  const end = start + n * width;
 
   const buckets: TimelineBucket[] = Array.from({ length: n }, (_, i) => ({
-    start: start + i * bucketMs,
-    end: start + (i + 1) * bucketMs,
+    start: start + i * width,
+    end: start + (i + 1) * width,
     count: 0,
     minBytes: null,
     maxBytes: null,
     meanBytes: null,
+    minCounter: null,
+    maxCounter: null,
+    lastCounter: null,
   }));
 
   const sums = new Array<number>(n).fill(0);
+  const inRange: typeof parsed = [];
 
-  for (const { t, bytes } of parsed) {
-    // Points outside an explicit filter domain are not plotted.
-    if (t < start || t > end) continue;
-    const index = Math.min(n - 1, Math.floor((t - start) / bucketMs));
+  for (const point of parsed) {
+    const { t, bytes, counter } = point;
+    // Points outside the plotted domain (e.g. beyond the bucket ceiling) are
+    // not charted, and are excluded from the summary stats so the two agree.
+    if (t < start || t >= end) continue;
+    inRange.push(point);
+
+    const index = Math.min(n - 1, Math.floor((t - start) / width));
     const bucket = buckets[index];
     bucket.count += 1;
     sums[index] += bytes;
@@ -100,23 +147,42 @@ export function buildTimeline(
       bucket.minBytes === null ? bytes : Math.min(bucket.minBytes, bytes);
     bucket.maxBytes =
       bucket.maxBytes === null ? bytes : Math.max(bucket.maxBytes, bytes);
+    bucket.minCounter =
+      bucket.minCounter === null ? counter : Math.min(bucket.minCounter, counter);
+    bucket.maxCounter =
+      bucket.maxCounter === null ? counter : Math.max(bucket.maxCounter, counter);
+    // Points are sorted, so the last one seen is the bucket's latest.
+    bucket.lastCounter = counter;
   }
 
   for (let i = 0; i < n; i++) {
     if (buckets[i].count > 0) buckets[i].meanBytes = sums[i] / buckets[i].count;
   }
 
-  const inRange = parsed.filter((p) => p.t >= start && p.t <= end);
-  const byteValues = inRange.map((p) => p.bytes);
+  // A counter that goes backwards between consecutive payloads is a reset —
+  // the discontinuities the reader is looking for in the counter chart.
+  let counterResets = 0;
+  for (let i = 1; i < inRange.length; i++) {
+    if (inRange[i].counter < inRange[i - 1].counter) counterResets += 1;
+  }
+
+  const bytes = inRange.map((p) => p.bytes);
+  const counters = inRange.map((p) => p.counter);
 
   return {
     buckets,
     start,
     end,
-    bucketMs,
+    bucketMs: width,
     total: inRange.length,
-    minBytes: byteValues.length ? Math.min(...byteValues) : null,
-    maxBytes: byteValues.length ? Math.max(...byteValues) : null,
+    minBytes: bytes.length ? Math.min(...bytes) : null,
+    maxBytes: bytes.length ? Math.max(...bytes) : null,
+    minCounter: counters.length ? Math.min(...counters) : null,
+    maxCounter: counters.length ? Math.max(...counters) : null,
+    firstCounter: counters.length ? counters[0] : null,
+    lastCounter: counters.length ? counters[counters.length - 1] : null,
+    counterResets,
+    clamped,
   };
 }
 
@@ -147,7 +213,11 @@ function niceNum(range: number, round: boolean): number {
 export function niceScale(
   min: number,
   max: number,
-  { zeroBased = false, tickCount = 4 }: { zeroBased?: boolean; tickCount?: number } = {},
+  {
+    zeroBased = false,
+    tickCount = 4,
+    integer = false,
+  }: { zeroBased?: boolean; tickCount?: number; integer?: boolean } = {},
 ): Scale {
   let lo = zeroBased ? 0 : min;
   let hi = max;
@@ -158,7 +228,9 @@ export function niceScale(
     hi += pad;
   }
 
-  const step = niceNum((hi - lo) / Math.max(1, tickCount - 1), true);
+  let step = niceNum((hi - lo) / Math.max(1, tickCount - 1), true);
+  // A count cannot be 1.5: never offer a tick the series can never land on.
+  if (integer) step = Math.max(1, Math.round(step));
   const start = Math.floor(lo / step) * step;
   const end = Math.ceil(hi / step) * step;
 
@@ -207,11 +279,20 @@ export function formatTimestamp(ms: number): string {
   );
 }
 
-/** Human bucket width, e.g. "30 s", "5 min", "2 h". */
+/** Human bucket width, e.g. "30 s", "5 min", "hour", "6 h", "day". */
 export function formatDuration(ms: number): string {
+  // A whole unit reads better named than numbered: "per hour", not "per 1 h".
+  if (ms === 3600_000) return "hour";
+  if (ms === 24 * 3600_000) return "day";
+  if (ms === 60_000) return "minute";
+
+  const trim = (value: number) =>
+    Number.isInteger(value) ? String(value) : value.toFixed(1);
+
   if (ms < 1000) return `${Math.round(ms)} ms`;
-  if (ms < 60_000) return `${Math.round(ms / 1000)} s`;
-  if (ms < 3600_000) return `${Math.round(ms / 60_000)} min`;
-  if (ms < 24 * 3600_000) return `${(ms / 3600_000).toFixed(1)} h`;
-  return `${(ms / (24 * 3600_000)).toFixed(1)} d`;
+  if (ms < 60_000) return `${trim(ms / 1000)} s`;
+  if (ms < 3600_000) return `${trim(ms / 60_000)} min`;
+  // Stay in hours up to two days: "25 h" is clearer than "1.0 d".
+  if (ms < 48 * 3600_000) return `${trim(ms / 3600_000)} h`;
+  return `${trim(ms / (24 * 3600_000))} d`;
 }

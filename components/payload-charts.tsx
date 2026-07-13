@@ -24,22 +24,39 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Label } from "@/components/ui/label";
 import {
   buildTimeline,
   formatDuration,
   formatTimestamp,
   formatTimeTick,
+  MAX_BUCKETS,
   median,
   niceScale,
   type Scale,
   type SummaryPoint,
   type Timeline,
 } from "@/lib/payload-timeline";
-import { Activity, ChartLine, TriangleAlert } from "lucide-react";
+import { Activity, ChartLine, Hash, TriangleAlert } from "lucide-react";
 
-const BUCKET_COUNT = 48;
-const PLOT_HEIGHT = 172;
-const PAD = { top: 12, right: 14, bottom: 24, left: 48 };
+const MINUTE = 60_000;
+const HOUR = 3_600_000;
+
+// Bucket widths the reader can switch between. One minute is the default: at
+// this device's ~1 payload/minute cadence each point is 0 or 1, so the line
+// shows every single reception and every missed minute.
+const INTERVALS = [
+  { label: "1 minute", ms: MINUTE },
+  { label: "5 minutes", ms: 5 * MINUTE },
+  { label: "15 minutes", ms: 15 * MINUTE },
+  { label: "1 hour", ms: HOUR },
+  { label: "6 hours", ms: 6 * HOUR },
+  { label: "1 day", ms: 24 * HOUR },
+];
+const DEFAULT_INTERVAL = MINUTE;
+
+const PLOT_HEIGHT = 200;
+const PAD = { top: 12, right: 16, bottom: 24, left: 56 };
 
 interface PayloadChartsProps {
   /** Range filter bounds as ISO instants, or null when unbounded. */
@@ -55,6 +72,7 @@ export function PayloadCharts({ from, to, refreshKey }: PayloadChartsProps) {
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [showValues, setShowValues] = useState(false);
+  const [bucketMs, setBucketMs] = useState(DEFAULT_INTERVAL);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,10 +110,14 @@ export function PayloadCharts({ from, to, refreshKey }: PayloadChartsProps) {
       buildTimeline(points, {
         from: from ? Date.parse(from) : null,
         to: to ? Date.parse(to) : null,
-        bucketCount: BUCKET_COUNT,
+        bucketMs,
       }),
-    [points, from, to],
+    [points, from, to, bucketMs],
   );
+
+  // A narrow interval over a wide range hits the bucket ceiling: say so rather
+  // than silently charting a slice of it.
+  const clamped = timeline?.clamped ?? false;
 
   return (
     <Card>
@@ -105,14 +127,34 @@ export function PayloadCharts({ from, to, refreshKey }: PayloadChartsProps) {
           Reception timeline
         </CardTitle>
         <CardAction>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowValues((v) => !v)}
-            disabled={!timeline}
-          >
-            {showValues ? "Hide values" : "Show values"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Label
+              htmlFor="bucket-interval"
+              className="text-xs text-muted-foreground"
+            >
+              Interval
+            </Label>
+            <select
+              id="bucket-interval"
+              value={bucketMs}
+              onChange={(e) => setBucketMs(Number(e.target.value))}
+              className="h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            >
+              {INTERVALS.map((interval) => (
+                <option key={interval.ms} value={interval.ms}>
+                  {interval.label}
+                </option>
+              ))}
+            </select>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowValues((v) => !v)}
+              disabled={!timeline}
+            >
+              {showValues ? "Hide values" : "Show values"}
+            </Button>
+          </div>
         </CardAction>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -133,14 +175,25 @@ export function PayloadCharts({ from, to, refreshKey }: PayloadChartsProps) {
                 range to chart all of them.
               </p>
             )}
+            {clamped && (
+              <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                <TriangleAlert className="h-3.5 w-3.5" />
+                At a {formatDuration(timeline.bucketMs)} interval this range
+                needs more than {formatCount(MAX_BUCKETS)} points — charting the
+                most recent {formatDuration(timeline.end - timeline.start)}{" "}
+                only ({formatTimestamp(timeline.start)} onwards). Widen the
+                interval or narrow the range to see the rest.
+              </p>
+            )}
             {/* Refetch holds the previous render at reduced opacity: no skeleton flash. */}
             <div
-              className={`grid gap-6 transition-opacity lg:grid-cols-2 ${
+              className={`space-y-8 transition-opacity ${
                 loading ? "opacity-60" : "opacity-100"
               }`}
             >
               <FrequencyChart timeline={timeline} />
               <ByteSizeChart timeline={timeline} />
+              <CounterChart timeline={timeline} />
             </div>
             {showValues && <ValuesTable timeline={timeline} />}
           </>
@@ -159,7 +212,8 @@ function FrequencyChart({ timeline }: { timeline: Timeline }) {
   // The reference is the typical *active* bucket: across a wide range most
   // buckets can be idle, and a reference pinned to the baseline says nothing.
   const typical = median(counts.filter((c) => c > 0));
-  const scale = niceScale(0, max, { zeroBased: true });
+  const scale = niceScale(0, max, { zeroBased: true, integer: true });
+  const unit = formatDuration(timeline.bucketMs);
 
   return (
     <figure className="space-y-1">
@@ -172,17 +226,19 @@ function FrequencyChart({ timeline }: { timeline: Timeline }) {
           {formatCount(timeline.total)} payload(s) ·{" "}
           {min === max ? (
             <>
-              perfectly constant at <span className="font-mono">{max}</span> per
-              bucket
+              perfectly constant at <span className="font-mono">{max}</span> per{" "}
+              {unit}
             </>
           ) : (
             <>
-              typically <span className="font-mono">{typical}</span> per active
-              bucket · range{" "}
+              typically <span className="font-mono">{typical}</span> per{" "}
+              {unit} that received anything · range{" "}
               <span className="font-mono">
                 {min}–{max}
               </span>{" "}
-              — anything far off the reference line is an extreme
+              — a {unit} with nothing received sits at{" "}
+              <span className="font-mono">0</span>, so the line is continuous
+              and every gap in reception is visible
             </>
           )}
         </p>
@@ -240,6 +296,53 @@ function ByteSizeChart({ timeline }: { timeline: Timeline }) {
         reference={constant ? null : minBytes}
         formatValue={formatCount}
         valueName="bytes"
+      />
+    </figure>
+  );
+}
+
+function CounterChart({ timeline }: { timeline: Timeline }) {
+  const { minCounter, maxCounter, firstCounter, lastCounter, counterResets } =
+    timeline;
+  // The counter is a whole number too — no half-frame ticks.
+  const scale = niceScale(minCounter ?? 0, maxCounter ?? 1, { integer: true });
+
+  return (
+    <figure className="space-y-1">
+      <figcaption className="space-y-0.5">
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          <Hash className="h-3.5 w-3.5 text-primary" />
+          Frame counter (reporting_counter)
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          Latest value in each bucket ·{" "}
+          <span className="font-mono">{firstCounter}</span> →{" "}
+          <span className="font-mono">{lastCounter}</span> · range{" "}
+          <span className="font-mono">
+            {minCounter}–{maxCounter}
+          </span>{" "}
+          ·{" "}
+          {counterResets === 0 ? (
+            "counting up without a reset"
+          ) : (
+            <>
+              <span className="font-mono">{counterResets}</span> reset(s) — each
+              drop is the counter starting over
+            </>
+          )}
+        </p>
+      </figcaption>
+      <LineChart
+        timeline={timeline}
+        values={timeline.buckets.map((b) => b.lastCounter)}
+        band={timeline.buckets.map((b) =>
+          b.minCounter === null || b.maxCounter === null
+            ? null
+            : [b.minCounter, b.maxCounter],
+        )}
+        scale={scale}
+        formatValue={formatCount}
+        valueName="counter"
       />
     </figure>
   );
@@ -344,7 +447,11 @@ function LineChart({
 
   const activeValue = active === null ? null : values[active];
   const yTicks = scale.ticks;
-  const xTickIndexes = [0, Math.floor(values.length / 2), values.length - 1];
+  // Full-width plots carry more x labels; keep them clear of each other.
+  const tickCount = Math.max(2, Math.min(6, Math.floor(width / 180)));
+  const xTickIndexes = Array.from({ length: tickCount }, (_, i) =>
+    Math.round((i * (values.length - 1)) / (tickCount - 1)),
+  );
 
   const moveActive = useCallback(
     (delta: number) => {
@@ -367,6 +474,7 @@ function LineChart({
   };
 
   const bucket = active === null ? null : timeline.buckets[active];
+  const activeSpread = active === null ? null : (band?.[active] ?? null);
 
   return (
     <div ref={containerRef} className="relative">
@@ -423,7 +531,11 @@ function LineChart({
             x={sx(index)}
             y={PLOT_HEIGHT - 6}
             textAnchor={
-              position === 0 ? "start" : position === 2 ? "end" : "middle"
+              position === 0
+                ? "start"
+                : position === xTickIndexes.length - 1
+                  ? "end"
+                  : "middle"
             }
             className="fill-muted-foreground text-[10px] [font-variant-numeric:tabular-nums]"
           >
@@ -532,12 +644,16 @@ function LineChart({
             </span>
             <span className="text-muted-foreground">{valueName}</span>
           </p>
-          {band && bucket.minBytes !== null && (
+          {activeSpread && (
             <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
-              min {bucket.minBytes} · max {bucket.maxBytes} · {bucket.count}{" "}
-              payload(s)
+              min {formatValue(activeSpread[0])} · max{" "}
+              {formatValue(activeSpread[1])}
             </p>
           )}
+          <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+            {formatCount(bucket.count)} payload(s) in this{" "}
+            {formatDuration(timeline.bucketMs)}
+          </p>
         </div>
       )}
     </div>
@@ -557,6 +673,7 @@ function ValuesTable({ timeline }: { timeline: Timeline }) {
             <TableHead className="text-right">Min bytes</TableHead>
             <TableHead className="text-right">Mean bytes</TableHead>
             <TableHead className="text-right">Max bytes</TableHead>
+            <TableHead className="text-right">Counter (last)</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -580,6 +697,9 @@ function ValuesTable({ timeline }: { timeline: Timeline }) {
               </TableCell>
               <TableCell className="text-right font-mono">
                 {bucket.maxBytes ?? "—"}
+              </TableCell>
+              <TableCell className="text-right font-mono">
+                {bucket.lastCounter ?? "—"}
               </TableCell>
             </TableRow>
           ))}

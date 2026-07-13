@@ -12,12 +12,14 @@ const MAX_POINTS = 20000;
 /**
  * GET /api/payloads/summary
  *
- * Returns the two series the dashboard charts need — reception time and byte
- * size — for *every* payload in the range, not just the page the table shows.
- * Only the two columns are selected, so the whole range stays cheap to ship.
+ * Returns the series the dashboard charts need — reception time, byte size and
+ * reporting counter — for *every* payload in the range, not just the page the
+ * table shows. Only those columns are selected, so the whole range stays cheap
+ * to ship.
  *
  * Query: `from` / `to` (optional, inclusive bounds on `created_at`).
- * Response: `{ success, points: [{ created_at, byte_length }], total, truncated }`
+ * Response:
+ * `{ success, points: [{ created_at, byte_length, reporting_counter }], total, truncated }`
  * ordered oldest first. `truncated` is true when the range holds more than
  * MAX_POINTS payloads and the response was cut short.
  */
@@ -34,13 +36,17 @@ export async function GET(request: NextRequest) {
 
     const supabase = await createClient();
 
-    const points: { created_at: string; byte_length: number }[] = [];
+    const points: {
+      created_at: string;
+      byte_length: number;
+      reporting_counter: number;
+    }[] = [];
     let truncated = false;
 
     for (let offset = 0; offset < MAX_POINTS; offset += CHUNK) {
       let query = supabase
         .from("payloads")
-        .select("created_at,byte_length")
+        .select("created_at,byte_length,reporting_counter")
         .order("created_at", { ascending: true })
         .range(offset, offset + CHUNK - 1);
 
