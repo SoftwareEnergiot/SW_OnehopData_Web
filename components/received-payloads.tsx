@@ -20,11 +20,21 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { PayloadAnalysisView } from "@/components/payload-analysis";
 import { PayloadCharts } from "@/components/payload-charts";
 import { analyzePayload, hexToBytes } from "@/lib/payload-decoder";
 import { formatErrorMask } from "@/lib/payload-errors";
 import { createdAtBoundFromInput, formatCreatedAt } from "@/lib/utils";
+import { CSV_COLUMNS, buildCsv, downloadCsv } from "@/lib/payload-csv";
 import type { PayloadRecord } from "@/lib/types";
 import { toast } from "sonner";
 import {
@@ -33,11 +43,21 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Database,
+  Download,
   RefreshCw,
+  SlidersHorizontal,
   X,
 } from "lucide-react";
 
 const PAGE_SIZES = [25, 50, 100, 200];
+
+// Rows pulled per request when gathering a full range for CSV export. Kept at
+// or below the Supabase default row cap so a single page never silently drops
+// rows off the end.
+const EXPORT_CHUNK = 1000;
+
+// Every CSV column key, used to seed the "all selected" default.
+const ALL_COLUMN_KEYS = CSV_COLUMNS.map((column) => column.key);
 
 export function ReceivedPayloads() {
   const [rows, setRows] = useState<PayloadRecord[]>([]);
@@ -58,6 +78,14 @@ export function ReceivedPayloads() {
   const [selectEdge, setSelectEdge] = useState<"first" | "last" | null>(null);
   // Bumped by Refresh so the charts refetch alongside the table.
   const [refreshKey, setRefreshKey] = useState(0);
+  // Columns included in a CSV export, keyed by CSV_COLUMNS[].key. All start
+  // selected; the picker never lets the set fall to empty.
+  const [selectedColumns, setSelectedColumns] = useState<Set<string>>(
+    () => new Set(ALL_COLUMN_KEYS),
+  );
+  // True while a CSV export is gathering rows, to disable the button and show
+  // progress.
+  const [exporting, setExporting] = useState(false);
 
   const fetchPayloads = useCallback(async () => {
     setLoading(true);
@@ -123,6 +151,88 @@ export function ReceivedPayloads() {
     setTo("");
     setPage(0);
   }, []);
+
+  // Toggle one column. The last remaining column cannot be turned off, so the
+  // export always carries at least one field.
+  const toggleColumn = useCallback((key: string) => {
+    setSelectedColumns((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        if (next.size === 1) return prev;
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
+
+  const selectAllColumns = useCallback(() => {
+    setSelectedColumns(new Set(ALL_COLUMN_KEYS));
+  }, []);
+
+  // "Deselect all" keeps the first column selected — an export needs at least
+  // one field, and this leaves an obvious one to build back up from.
+  const deselectAllColumns = useCallback(() => {
+    setSelectedColumns(new Set([ALL_COLUMN_KEYS[0]]));
+  }, []);
+
+  // Fetch every payload in the current range (all pages), most-recent first.
+  const fetchAllInRange = useCallback(async (): Promise<PayloadRecord[]> => {
+    const all: PayloadRecord[] = [];
+    let offset = 0;
+    for (;;) {
+      const params = new URLSearchParams({
+        limit: String(EXPORT_CHUNK),
+        offset: String(offset),
+      });
+      const fromBound = createdAtBoundFromInput(from, "from");
+      if (fromBound) params.set("from", fromBound);
+      const toBound = createdAtBoundFromInput(to, "to");
+      if (toBound) params.set("to", toBound);
+
+      const response = await fetch(`/api/payloads?${params.toString()}`, {
+        cache: "no-store",
+      });
+      const result = await response.json();
+      if (!result.success) {
+        throw new Error(result.error ?? "Failed to load payloads");
+      }
+      const batch: PayloadRecord[] = result.data ?? [];
+      all.push(...batch);
+      const count: number = result.total ?? all.length;
+      // Stop once we've collected the reported total, or a short page signals
+      // the end (guards against a total that lags behind the data).
+      if (all.length >= count || batch.length < EXPORT_CHUNK) break;
+      offset += EXPORT_CHUNK;
+    }
+    return all;
+  }, [from, to]);
+
+  // Gather the full range and download it as CSV using the selected columns.
+  const handleDownloadCsv = useCallback(async () => {
+    setExporting(true);
+    try {
+      const data = await fetchAllInRange();
+      if (data.length === 0) {
+        toast.error("No payloads to download in the selected range.");
+        return;
+      }
+      const csv = buildCsv(data, selectedColumns);
+      const stamp = new Date()
+        .toISOString()
+        .slice(0, 19)
+        .replace(/[:T]/g, "-");
+      downloadCsv(csv, `payloads-${stamp}.csv`);
+      toast.success(`Downloaded ${data.length} payload(s).`);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Could not export payloads.",
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [fetchAllInRange, selectedColumns]);
 
   const hasFilter = from !== "" || to !== "";
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
@@ -229,7 +339,67 @@ export function ReceivedPayloads() {
             Received payloads
           </CardTitle>
           <CardAction>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-2">
+                    <SlidersHorizontal className="h-4 w-4" />
+                    Columns
+                    <span className="text-xs text-muted-foreground">
+                      ({selectedColumns.size}/{CSV_COLUMNS.length})
+                    </span>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuLabel>CSV columns</DropdownMenuLabel>
+                  <div className="flex gap-1 px-1 py-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 flex-1"
+                      onClick={selectAllColumns}
+                    >
+                      Select all
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 flex-1"
+                      onClick={deselectAllColumns}
+                    >
+                      Deselect all
+                    </Button>
+                  </div>
+                  <DropdownMenuSeparator />
+                  {CSV_COLUMNS.map((column) => {
+                    const checked = selectedColumns.has(column.key);
+                    const isLast = checked && selectedColumns.size === 1;
+                    return (
+                      <DropdownMenuCheckboxItem
+                        key={column.key}
+                        checked={checked}
+                        disabled={isLast}
+                        // Keep the menu open so several columns can be toggled
+                        // in one pass.
+                        onSelect={(e) => e.preventDefault()}
+                        onCheckedChange={() => toggleColumn(column.key)}
+                      >
+                        {column.label}
+                      </DropdownMenuCheckboxItem>
+                    );
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDownloadCsv}
+                disabled={exporting}
+                className="gap-2"
+              >
+                <Download className="h-4 w-4" />
+                {exporting ? "Exporting…" : "Download CSV"}
+              </Button>
               <Label
                 htmlFor="page-size"
                 className="text-xs text-muted-foreground"
