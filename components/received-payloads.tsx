@@ -59,11 +59,6 @@ export function ReceivedPayloads() {
   // Bumped by Refresh so the charts refetch alongside the table.
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // The range as ISO instants — the one slice both the charts and the table
-  // are drawn from, so their numbers always agree.
-  const fromBound = createdAtBoundFromInput(from, "from");
-  const toBound = createdAtBoundFromInput(to, "to");
-
   const fetchPayloads = useCallback(async () => {
     setLoading(true);
     try {
@@ -169,8 +164,8 @@ export function ReceivedPayloads() {
 
   return (
     <div className="space-y-6">
-      {/* One filter row, above everything it scopes: the charts and the table
-          are drawn from the same slice, so their numbers always agree. */}
+      {/* This filter scopes the table below. The charts carry their own
+          independent range so previous data can be viewed on them alone. */}
       <Card>
         <CardContent className="flex flex-wrap items-end gap-3">
           <div className="grid gap-1.5">
@@ -225,11 +220,7 @@ export function ReceivedPayloads() {
         </CardContent>
       </Card>
 
-      <PayloadCharts
-        from={fromBound}
-        to={toBound}
-        refreshKey={refreshKey}
-      />
+      <PayloadCharts refreshKey={refreshKey} />
 
       <Card>
         <CardHeader>

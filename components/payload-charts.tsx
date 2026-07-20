@@ -16,6 +16,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -37,7 +38,8 @@ import {
   type SummaryPoint,
   type Timeline,
 } from "@/lib/payload-timeline";
-import { Activity, ChartLine, Hash, TriangleAlert } from "lucide-react";
+import { createdAtBoundFromInput } from "@/lib/utils";
+import { Activity, ChartLine, Hash, TriangleAlert, X } from "lucide-react";
 
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
@@ -59,27 +61,35 @@ const PLOT_HEIGHT = 200;
 const PAD = { top: 12, right: 16, bottom: 24, left: 56 };
 
 interface PayloadChartsProps {
-  /** Range filter bounds as ISO instants, or null when unbounded. */
-  from: string | null;
-  to: string | null;
   /** Bumped by the parent's Refresh button to force a refetch. */
   refreshKey: number;
 }
 
-export function PayloadCharts({ from, to, refreshKey }: PayloadChartsProps) {
+export function PayloadCharts({ refreshKey }: PayloadChartsProps) {
   const [points, setPoints] = useState<SummaryPoint[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [showValues, setShowValues] = useState(false);
   const [bucketMs, setBucketMs] = useState(DEFAULT_INTERVAL);
+  // The charts carry their own received-timestamp range, independent of the
+  // table's filter, so the reader can pan back over previous data on the charts
+  // alone. Values are wall-clock strings from <input type="datetime-local">,
+  // read on the same clock as the created_at timestamps they filter.
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const hasFilter = from !== "" || to !== "";
+
+  // The range as ISO instants — the slice the timeline is drawn from.
+  const fromBound = createdAtBoundFromInput(from, "from");
+  const toBound = createdAtBoundFromInput(to, "to");
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     const params = new URLSearchParams();
-    if (from) params.set("from", from);
-    if (to) params.set("to", to);
+    if (fromBound) params.set("from", fromBound);
+    if (toBound) params.set("to", toBound);
 
     fetch(`/api/payloads/summary?${params.toString()}`, { cache: "no-store" })
       .then((response) => response.json())
@@ -103,16 +113,16 @@ export function PayloadCharts({ from, to, refreshKey }: PayloadChartsProps) {
     return () => {
       cancelled = true;
     };
-  }, [from, to, refreshKey]);
+  }, [fromBound, toBound, refreshKey]);
 
   const timeline = useMemo(
     () =>
       buildTimeline(points, {
-        from: from ? Date.parse(from) : null,
-        to: to ? Date.parse(to) : null,
+        from: fromBound ? Date.parse(fromBound) : null,
+        to: toBound ? Date.parse(toBound) : null,
         bucketMs,
       }),
-    [points, from, to, bucketMs],
+    [points, fromBound, toBound, bucketMs],
   );
 
   // A narrow interval over a wide range hits the bucket ceiling: say so rather
@@ -127,25 +137,75 @@ export function PayloadCharts({ from, to, refreshKey }: PayloadChartsProps) {
           Reception timeline
         </CardTitle>
         <CardAction>
-          <div className="flex items-center gap-2">
-            <Label
-              htmlFor="bucket-interval"
-              className="text-xs text-muted-foreground"
-            >
-              Interval
-            </Label>
-            <select
-              id="bucket-interval"
-              value={bucketMs}
-              onChange={(e) => setBucketMs(Number(e.target.value))}
-              className="h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            >
-              {INTERVALS.map((interval) => (
-                <option key={interval.ms} value={interval.ms}>
-                  {interval.label}
-                </option>
-              ))}
-            </select>
+          <div className="flex flex-wrap items-end justify-end gap-3">
+            {/* The charts' own range — pan back over previous data without
+                touching the table's filter below. */}
+            <div className="grid gap-1.5">
+              <Label
+                htmlFor="chart-from"
+                className="text-xs text-muted-foreground"
+              >
+                From
+              </Label>
+              <Input
+                id="chart-from"
+                type="datetime-local"
+                value={from}
+                max={to || undefined}
+                onChange={(e) => setFrom(e.target.value)}
+                className="h-9 w-auto"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label
+                htmlFor="chart-to"
+                className="text-xs text-muted-foreground"
+              >
+                To
+              </Label>
+              <Input
+                id="chart-to"
+                type="datetime-local"
+                value={to}
+                min={from || undefined}
+                onChange={(e) => setTo(e.target.value)}
+                className="h-9 w-auto"
+              />
+            </div>
+            {hasFilter && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setFrom("");
+                  setTo("");
+                }}
+                className="gap-1"
+              >
+                <X className="h-4 w-4" />
+                Clear
+              </Button>
+            )}
+            <div className="grid gap-1.5">
+              <Label
+                htmlFor="bucket-interval"
+                className="text-xs text-muted-foreground"
+              >
+                Interval
+              </Label>
+              <select
+                id="bucket-interval"
+                value={bucketMs}
+                onChange={(e) => setBucketMs(Number(e.target.value))}
+                className="h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              >
+                {INTERVALS.map((interval) => (
+                  <option key={interval.ms} value={interval.ms}>
+                    {interval.label}
+                  </option>
+                ))}
+              </select>
+            </div>
             <Button
               variant="outline"
               size="sm"
