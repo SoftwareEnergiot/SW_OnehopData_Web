@@ -27,6 +27,12 @@ import {
 } from "@/components/ui/table";
 import { Label } from "@/components/ui/label";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   buildTimeline,
   formatDuration,
   formatTimestamp,
@@ -38,8 +44,26 @@ import {
   type SummaryPoint,
   type Timeline,
 } from "@/lib/payload-timeline";
+import {
+  buildTimelineCsv,
+  chartsToPngBlob,
+  downloadBlob,
+  exportStamp,
+  type ChartFigure,
+} from "@/lib/chart-export";
+import { downloadCsv } from "@/lib/payload-csv";
 import { createdAtBoundFromInput } from "@/lib/utils";
-import { Activity, ChartLine, Hash, TriangleAlert, X } from "lucide-react";
+import { toast } from "sonner";
+import {
+  Activity,
+  ChartLine,
+  Download,
+  FileImage,
+  Hash,
+  Sheet,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
@@ -129,6 +153,55 @@ export function PayloadCharts({ refreshKey }: PayloadChartsProps) {
   // than silently charting a slice of it.
   const clamped = timeline?.clamped ?? false;
 
+  // Wraps the three plots so an export can gather their <svg>s and the card's
+  // resolved colours together.
+  const chartsRef = useRef<HTMLDivElement>(null);
+  const [exportingPng, setExportingPng] = useState(false);
+  const canExport = Boolean(timeline && timeline.total > 0);
+
+  // The bucket rows the "Show values" table renders, downloaded as a CSV.
+  const handleExportCsv = useCallback(() => {
+    if (!timeline) return;
+    try {
+      downloadCsv(
+        buildTimelineCsv(timeline),
+        `reception-timeline-${exportStamp()}.csv`,
+      );
+      toast.success(`Exported ${timeline.buckets.length} bucket(s).`);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Could not export the data.",
+      );
+    }
+  }, [timeline]);
+
+  // The three plots, stacked into one PNG image at device resolution.
+  const handleExportPng = useCallback(async () => {
+    const container = chartsRef.current;
+    if (!container) return;
+    setExportingPng(true);
+    try {
+      // Each plot is the role="img" <svg>; the icons in the titles are plain
+      // decorative <svg>s and are skipped by that selector.
+      const figures = Array.from(container.querySelectorAll("figure"))
+        .map((figure): ChartFigure | null => {
+          const svg = figure.querySelector<SVGSVGElement>("svg[role='img']");
+          if (!svg) return null;
+          return { title: figure.querySelector("h3")?.textContent?.trim() ?? "", svg };
+        })
+        .filter((f): f is ChartFigure => f !== null);
+      const blob = await chartsToPngBlob(figures, container);
+      downloadBlob(blob, `reception-timeline-${exportStamp()}.png`);
+      toast.success("Exported charts as PNG.");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Could not export the charts.",
+      );
+    } finally {
+      setExportingPng(false);
+    }
+  }, []);
+
   return (
     <Card>
       <CardHeader>
@@ -214,6 +287,29 @@ export function PayloadCharts({ refreshKey }: PayloadChartsProps) {
             >
               {showValues ? "Hide values" : "Show values"}
             </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!canExport || exportingPng}
+                  className="gap-2"
+                >
+                  <Download className="h-4 w-4" />
+                  {exportingPng ? "Exporting…" : "Export"}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={handleExportCsv}>
+                  <Sheet className="h-4 w-4" />
+                  Data as CSV
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={handleExportPng}>
+                  <FileImage className="h-4 w-4" />
+                  Charts as PNG
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </CardAction>
       </CardHeader>
@@ -247,6 +343,7 @@ export function PayloadCharts({ refreshKey }: PayloadChartsProps) {
             )}
             {/* Refetch holds the previous render at reduced opacity: no skeleton flash. */}
             <div
+              ref={chartsRef}
               className={`space-y-8 transition-opacity ${
                 loading ? "opacity-60" : "opacity-100"
               }`}
