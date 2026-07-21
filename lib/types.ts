@@ -28,34 +28,5 @@ export interface PayloadListResponse {
   offset: number;
 }
 
-// Shape returned by POST /api/payloads after a successful ingest.
-export interface PayloadIngestResponse {
-  success: boolean;
-  stored: boolean;
-  id: string | null;
-  meta: {
-    byteLength: number;
-    expectedLength: number;
-    sampleCount: number;
-    version: number;
-  };
-  hex: string;
-  binary: string;
-  header: {
-    payload_version: number;
-    sample_count: number;
-  };
-  samples: DecodedSample[];
-  context: DecodedContext;
-  error_mask: number;
-  error_mask_hex: string;
-  reporting_counter: number;
-  errors: ResolvedError[];
-}
-
-// Error body returned when decoding fails.
-export interface PayloadErrorResponse {
-  success: false;
-  error: string;
-  code: string;
-}
+// POST /api/payloads returns no body — the outcome is the HTTP status alone
+// (204 accepted, 4xx decode failure, 500 unexpected error).

@@ -1,8 +1,14 @@
 # `POST /api/payloads` — Payload Ingestion Endpoint
 
 Receives a **raw binary LoRaWAN V0 payload** from a device, decodes it according
-to the *Payload Encode - LoraWAN V0* protocol, best-effort stores both the raw
-and decoded forms in Supabase, and returns the full analysis as JSON.
+to the *Payload Encode - LoraWAN V0* protocol, and best-effort stores both the raw
+and decoded forms in Supabase.
+
+> **The response has no body.** The endpoint answers with an **HTTP status only** —
+> `204 No Content` when the payload was accepted, a `4xx` when it could not be
+> decoded, `500` on an unexpected error. Nothing about the decode (or about the
+> storage outcome) is returned to the caller. Read the decoded payloads back with
+> `GET /api/payloads` or in the dashboard.
 
 > **Authentication: none.** This endpoint is intentionally **public** — external
 > LoRaWAN devices POST here machine-to-machine and have no Clerk session. It is
@@ -100,44 +106,26 @@ this document.)
 
 ## Response
 
-### `200 OK` — success
+**Always empty.** No JSON, no headers carrying the decode — the status code is
+the entire answer. Clients should branch on `response.status` alone; the decode
+detail is written to the server log, not to the caller.
 
-`Content-Type: application/json`. Body shape (`PayloadIngestResponse` in
-`lib/types.ts`):
+| HTTP status | Meaning                                                                          |
+| ----------- | -------------------------------------------------------------------------------- |
+| `204`       | Payload decoded and accepted.                                                    |
+| `400`       | Decode failed: empty body, invalid length, unsupported version, or a header sample-count mismatch. |
+| `415`       | Body could not be read as raw bytes.                                            |
+| `500`       | Unexpected server error.                                                         |
 
-| Field            | Type                | Description                                                             |
-| ---------------- | ------------------- | ---------------------------------------------------------------------- |
-| `success`        | `boolean`           | Always `true` on a `200`.                                              |
-| `stored`         | `boolean`           | `true` if persisted to Supabase; `false` if storage was skipped/failed. |
-| `id`             | `string \| null`    | Row id of the stored payload, or `null` when not stored.               |
-| `meta`           | `object`            | `{ byteLength, expectedLength, sampleCount, version }`.                 |
-| `hex`            | `string`            | Continuous lowercase hexadecimal of the raw body.                      |
-| `binary`         | `string`            | Space-separated 8-bit binary of each byte.                             |
-| `header`         | `object`            | `{ payload_version, sample_count }`.                                    |
-| `samples`        | `DecodedSample[]`   | One object per sample, with the 13 channels above (raw values).        |
-| `context`        | `object`            | `{ error_mask, reporting_counter }`.                                    |
-| `error_mask`     | `number`            | Numeric error mask (unsigned 32-bit).                                  |
-| `error_mask_hex` | `string`            | Canonical form, e.g. `"0x00000018"`.                                   |
-| `reporting_counter` | `number`         | Device reporting counter.                                             |
-| `errors`         | `ResolvedError[]`   | Expanded error flags: `{ bit, code, name, description, color }`.        |
+> **Storage is best-effort and invisible to the caller.** If Supabase is not
+> configured or the insert fails, the payload still decoded, so the request is
+> still answered with `204`. A storage failure never turns into an HTTP error,
+> and the caller is not told whether the row was written — check the dashboard or
+> `GET /api/payloads`.
 
-> **Storage is best-effort.** If Supabase is not configured or the insert fails,
-> the decode still succeeds and the response is returned with `stored: false`
-> and `id: null`. A storage failure never turns into an HTTP error.
-
-### Error responses
-
-Decode failures map a stable error `code` to an HTTP status. Body shape
-(`PayloadErrorResponse` in `lib/types.ts`): `{ success: false, error, code }`.
-
-| HTTP status | `code`                  | Cause                                                                     |
-| ----------- | ----------------------- | ------------------------------------------------------------------------- |
-| `400`       | `EMPTY_PAYLOAD`         | Request body was empty (0 bytes).                                         |
-| `400`       | `INVALID_LENGTH`        | Too short, or the sample region is not a multiple of 28 bytes.           |
-| `400`       | `UNSUPPORTED_VERSION`   | Header version byte is not a supported version (only `0` / V0).          |
-| `400`       | `SAMPLE_COUNT_MISMATCH` | Header sample count disagrees with the length-implied count.             |
-| `415`       | `MALFORMED_BODY`        | Body could not be read as raw bytes.                                     |
-| `500`       | *(none)*                | Unexpected server error: `{ success: false, error, details }`.           |
+The internal decode error codes (`EMPTY_PAYLOAD`, `INVALID_LENGTH`,
+`UNSUPPORTED_VERSION`, `SAMPLE_COUNT_MISMATCH` → `400`; `MALFORMED_BODY` → `415`)
+are logged server-side only.
 
 ---
 
@@ -146,14 +134,17 @@ Decode failures map a stable error `code` to an HTTP status. Body shape
 ### curl — canonical example payload (150 bytes, 5 samples)
 
 The body must be sent as raw bytes. Convert a hex string to binary with `xxd -r -p`
-and stream it with `--data-binary @-`:
+and stream it with `--data-binary @-`. There is no body to print, so ask curl for
+the status code:
 
 ```bash
 echo -n "0005BB00DA00D700BC008C020000000000000000C60016FD100200000000BB00BA00D700BC008C020000000000000000C60016FD110200000000BB00DA00D700BC008C020000000000000000C70016FD100200000000BA00DA00D700BC008C020000000000000000C60016FD110200000000BA00DA00D700BC008B020000000000000000C60016FD1102000000001800000000000000" \
   | xxd -r -p \
-  | curl -s -X POST https://onehop-data.vercel.app/api/payloads \
+  | curl -s -o /dev/null -w '%{http_code}\n' \
+      -X POST https://onehop-data.vercel.app/api/payloads \
       -H "Content-Type: application/octet-stream" \
-      --data-binary @- | jq
+      --data-binary @-
+# → 204
 ```
 
 ### Node.js (fetch)
@@ -165,51 +156,35 @@ const res = await fetch("https://onehop-data.vercel.app/api/payloads", {
   headers: { "Content-Type": "application/octet-stream" },
   body: payload,
 });
-const analysis = await res.json();
-```
-
-### Expected decoded output (excerpt)
-
-```jsonc
-{
-  "success": true,
-  "stored": false,
-  "id": null,
-  "meta": { "byteLength": 150, "expectedLength": 150, "sampleCount": 5, "version": 0 },
-  "header": { "payload_version": 0, "sample_count": 5 },
-  "samples": [
-    {
-      "temp1_x10": 187, "temp2_x10": 218, "temp3_x10": 215,
-      "amb_temp_x10": 188, "amb_hum_x10": 652,
-      "int_temp_x10": 0, "int_hum_x10": 0, "lux": 0,
-      "accel_x": 198, "accel_y": -746, "accel_z": 528,
-      "current1": 0, "current2": 0
-    }
-    // … 4 more samples
-  ],
-  "context": { "error_mask": 24, "reporting_counter": 0 },
-  "error_mask": 24,
-  "error_mask_hex": "0x00000018",
-  "reporting_counter": 0,
-  "errors": [
-    { "code": "0x00000008", "name": "ERR_RSN_SENSOR_HALL_EFFECT_1", "description": "Cannot configure/read hall effect sensor 1" },
-    { "code": "0x00000010", "name": "ERR_RSN_SENSOR_HALL_EFFECT_2", "description": "Cannot configure/read hall effect sensor 2" }
-  ]
-}
+// No body is returned — the status is the result.
+if (!res.ok) throw new Error(`Payload rejected: HTTP ${res.status}`);
 ```
 
 ---
 
 ## Related: `GET /api/payloads` (listing)
 
-Lists stored payloads, most recent first. Also public (no auth). Query
-parameters:
+Lists stored payloads, most recent first — this is how decoded payloads are read
+back. Also public (no auth). Query parameters:
 
-| Param        | Type     | Default | Description                                   |
-| ------------ | -------- | ------- | --------------------------------------------- |
-| `limit`      | `number` | `50`    | Page size.                                    |
-| `offset`     | `number` | `0`     | Rows to skip.                                 |
-| `error_mask` | `number` | —       | Optional exact-match filter on `error_mask`.  |
+| Param        | Type     | Default | Description                                                            |
+| ------------ | -------- | ------- | ---------------------------------------------------------------------- |
+| `limit`      | `number` | `50`    | Page size.                                                             |
+| `offset`     | `number` | `0`     | Rows to skip. With `limit`, pages through every payload in the range.  |
+| `error_mask` | `number` | —       | Optional exact-match filter on `error_mask`.                          |
+| `from`       | `string` | —       | Optional lower bound on the received timestamp (`created_at`, inclusive). Any `Date`-parseable value, e.g. an ISO 8601 instant. |
+| `to`         | `string` | —       | Optional upper bound on the received timestamp (`created_at`, inclusive). Any `Date`-parseable value, e.g. an ISO 8601 instant. |
 
-Response: `{ success, data: PayloadRecord[], total, limit, offset }`.
+Unparseable `from` / `to` values are ignored rather than erroring. Example:
+`GET /api/payloads?from=2026-07-01T00:00:00Z&to=2026-07-06T23:59:59Z&limit=50&offset=100`.
+
+Response: `{ success, data: PayloadRecord[], total, limit, offset }` — `total` is
+the full count matching the filter (ignoring `limit`/`offset`), which is what the
+dashboard uses to page through the range.
+
+`created_at` is returned as stored (UTC). The dashboard converts it to Madrid
+local time (`Europe/Madrid`, CET/CEST) for display — table stamps, chart axes and
+tooltips all read on that clock, with no offset shown — and the `from` / `to`
+filter inputs are read as Madrid local time and sent to the API as UTC instants,
+so the range selects exactly the rows shown.
 ```

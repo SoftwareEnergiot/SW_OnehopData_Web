@@ -1,0 +1,68 @@
+import { formatCreatedAt } from "@/lib/utils";
+import { formatErrorMask } from "@/lib/payload-errors";
+import type { PayloadRecord } from "@/lib/types";
+
+// A single exportable CSV column: a stable key, the header shown in the file
+// and the column-picker, and how to render a row's value as a string.
+export interface CsvColumn {
+  key: string;
+  label: string;
+  value: (row: PayloadRecord) => string;
+}
+
+// Every column the CSV can carry, in export order. The first six mirror the
+// on-screen table; the rest expose the raw decoded payload fields (complex
+// values are serialised as JSON so a single cell round-trips them). Request
+// metadata unrelated to the payload data (row id, source IP, user agent) is
+// deliberately left out.
+export const CSV_COLUMNS: CsvColumn[] = [
+  { key: "created_at", label: "Received", value: (r) => formatCreatedAt(r.created_at) },
+  { key: "payload_version", label: "Version", value: (r) => String(r.payload_version) },
+  { key: "sample_count", label: "Samples", value: (r) => String(r.sample_count) },
+  { key: "error_mask", label: "Error mask", value: (r) => formatErrorMask(r.error_mask) },
+  { key: "reporting_counter", label: "Counter", value: (r) => String(r.reporting_counter) },
+  { key: "byte_length", label: "Bytes", value: (r) => String(r.byte_length) },
+  { key: "payload_hex", label: "Payload hex", value: (r) => r.payload_hex },
+  { key: "payload_binary", label: "Payload binary", value: (r) => r.payload_binary ?? "" },
+  { key: "samples", label: "Samples (JSON)", value: (r) => JSON.stringify(r.samples ?? []) },
+  { key: "context", label: "Context (JSON)", value: (r) => JSON.stringify(r.context ?? {}) },
+  { key: "errors", label: "Errors (JSON)", value: (r) => JSON.stringify(r.errors ?? []) },
+];
+
+// Escape a single CSV field per RFC 4180: wrap in quotes when it contains a
+// comma, quote, or newline, doubling any embedded quotes.
+function escapeCsvField(value: string): string {
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+// Build a CSV document from the given rows using only the selected columns
+// (in CSV_COLUMNS order). Rows are emitted CRLF-terminated for Excel.
+export function buildCsv(
+  rows: PayloadRecord[],
+  selectedKeys: ReadonlySet<string>,
+): string {
+  const columns = CSV_COLUMNS.filter((column) => selectedKeys.has(column.key));
+  const header = columns.map((column) => escapeCsvField(column.label));
+  const lines = [header.join(",")];
+  for (const row of rows) {
+    lines.push(columns.map((column) => escapeCsvField(column.value(row))).join(","));
+  }
+  return lines.join("\r\n");
+}
+
+// Trigger a browser download of `content` as a file named `filename`.
+export function downloadCsv(content: string, filename: string): void {
+  // Prepend a UTF-8 BOM so Excel reads accented characters correctly.
+  const blob = new Blob(["﻿", content], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
