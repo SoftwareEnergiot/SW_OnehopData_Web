@@ -277,6 +277,104 @@ describe("buildTimeline", () => {
   });
 });
 
+// A V1 point, carrying the battery and radio diagnostics that scripts/004
+// exposes as columns.
+const v1Point = (
+  iso: string,
+  diagnostics: Partial<SummaryPoint> = {},
+): SummaryPoint => ({
+  created_at: iso,
+  byte_length: 82,
+  reporting_counter: 0,
+  battery_soc: 87,
+  battery_voltage: 4012,
+  rsrp: -95,
+  snr: 8,
+  ...diagnostics,
+});
+
+describe("buildTimeline — V1 diagnostics", () => {
+  it("reports no diagnostics for a range of V0 payloads", () => {
+    const timeline = buildTimeline(
+      [point("2026-07-13T00:10:00Z"), point("2026-07-13T00:20:00Z")],
+      { bucketMs: HOUR },
+    )!;
+    expect(timeline.batteryCount).toBe(0);
+    expect(timeline.signalCount).toBe(0);
+    expect(timeline.minBatterySoc).toBeNull();
+    expect(timeline.minRsrp).toBeNull();
+    expect(timeline.buckets[0].meanBatterySoc).toBeNull();
+  });
+
+  it("aggregates battery and radio stats per bucket", () => {
+    const timeline = buildTimeline(
+      [
+        v1Point("2026-07-13T00:10:00Z", { battery_soc: 90, rsrp: -100, snr: 6 }),
+        v1Point("2026-07-13T00:50:00Z", { battery_soc: 88, rsrp: -90, snr: 10 }),
+        v1Point("2026-07-13T01:10:00Z", { battery_soc: 86, rsrp: -95, snr: 8 }),
+      ],
+      { bucketMs: HOUR },
+    )!;
+
+    expect(timeline.batteryCount).toBe(3);
+    expect(timeline.firstBatterySoc).toBe(90);
+    expect(timeline.lastBatterySoc).toBe(86);
+    expect(timeline.minBatterySoc).toBe(86);
+    expect(timeline.maxBatterySoc).toBe(90);
+
+    expect(timeline.buckets[0].meanBatterySoc).toBe(89);
+    expect(timeline.buckets[0].minBatterySoc).toBe(88);
+    expect(timeline.buckets[0].maxBatterySoc).toBe(90);
+    expect(timeline.buckets[0].meanRsrp).toBe(-95);
+    expect(timeline.buckets[0].meanSnr).toBe(8);
+    expect(timeline.buckets[0].lastBatteryVoltage).toBe(4012);
+
+    expect(timeline.buckets[1].meanBatterySoc).toBe(86);
+  });
+
+  it("treats an RSRP or SNR of 0 as 'not available', not as a reading", () => {
+    const timeline = buildTimeline(
+      [
+        v1Point("2026-07-13T00:10:00Z", { rsrp: 0, snr: 0 }),
+        v1Point("2026-07-13T00:20:00Z", { rsrp: -110, snr: 4 }),
+      ],
+      { bucketMs: HOUR },
+    )!;
+    // Only the real measurement counts — a 0 would have plotted as the
+    // strongest signal in the range.
+    expect(timeline.signalCount).toBe(1);
+    expect(timeline.minRsrp).toBe(-110);
+    expect(timeline.maxRsrp).toBe(-110);
+    expect(timeline.buckets[0].meanRsrp).toBe(-110);
+    expect(timeline.minSnr).toBe(4);
+  });
+
+  it("keeps a battery SoC of 0, which is a flat battery rather than a gap", () => {
+    const timeline = buildTimeline(
+      [v1Point("2026-07-13T00:10:00Z", { battery_soc: 0 })],
+      { bucketMs: HOUR },
+    )!;
+    expect(timeline.batteryCount).toBe(1);
+    expect(timeline.minBatterySoc).toBe(0);
+    expect(timeline.buckets[0].meanBatterySoc).toBe(0);
+  });
+
+  it("handles a range mixing V0 and V1 payloads", () => {
+    const timeline = buildTimeline(
+      [
+        point("2026-07-13T00:10:00Z"),
+        v1Point("2026-07-13T00:20:00Z", { battery_soc: 80 }),
+      ],
+      { bucketMs: HOUR },
+    )!;
+    expect(timeline.total).toBe(2);
+    // The stats describe only the payloads that actually reported one, so the
+    // caption can say "reported by 1 of 2 payloads".
+    expect(timeline.batteryCount).toBe(1);
+    expect(timeline.buckets[0].meanBatterySoc).toBe(80);
+  });
+});
+
 describe("niceScale", () => {
   it("brackets a constant series so the flat line lands off the edges", () => {
     const { domain } = niceScale(66, 66);

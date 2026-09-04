@@ -56,11 +56,13 @@ import { createdAtBoundFromInput } from "@/lib/utils";
 import { toast } from "sonner";
 import {
   Activity,
+  BatteryMedium,
   ChartLine,
   Download,
   FileImage,
   Hash,
   Sheet,
+  SignalHigh,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -351,6 +353,10 @@ export function PayloadCharts({ refreshKey }: PayloadChartsProps) {
               <FrequencyChart timeline={timeline} />
               <ByteSizeChart timeline={timeline} />
               <CounterChart timeline={timeline} />
+              {/* V1 only: a range of V0 payloads carries no diagnostics, and an
+                  empty plot says less than no plot at all. */}
+              {timeline.batteryCount > 0 && <BatteryChart timeline={timeline} />}
+              {timeline.signalCount > 0 && <SignalChart timeline={timeline} />}
             </div>
             {showValues && <ValuesTable timeline={timeline} />}
           </>
@@ -500,6 +506,146 @@ function CounterChart({ timeline }: { timeline: Timeline }) {
         scale={scale}
         formatValue={formatCount}
         valueName="counter"
+      />
+    </figure>
+  );
+}
+
+// V1 battery diagnostics. Plots the mean state of charge per bucket with the
+// bucket's min-max spread behind it. The scale is pinned to 0-100 rather than
+// fitted to the data: a battery drifting 87 → 85 % should read as the near-flat
+// line it is, not as a cliff produced by an auto-fitted axis.
+function BatteryChart({ timeline }: { timeline: Timeline }) {
+  const {
+    batteryCount,
+    minBatterySoc,
+    maxBatterySoc,
+    firstBatterySoc,
+    lastBatterySoc,
+    minBatteryVoltage,
+    maxBatteryVoltage,
+    total,
+  } = timeline;
+  const scale = niceScale(0, 100, { zeroBased: true, integer: true });
+  const drop =
+    firstBatterySoc !== null && lastBatterySoc !== null
+      ? firstBatterySoc - lastBatterySoc
+      : null;
+
+  return (
+    <figure className="space-y-1">
+      <figcaption className="space-y-0.5">
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          <BatteryMedium className="h-3.5 w-3.5 text-primary" />
+          Battery state of charge (%)
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          <span className="font-mono">{firstBatterySoc}</span> →{" "}
+          <span className="font-mono">{lastBatterySoc}</span> % · range{" "}
+          <span className="font-mono">
+            {minBatterySoc}–{maxBatterySoc}
+          </span>{" "}
+          %
+          {drop !== null && drop > 0 ? (
+            <>
+              {" "}
+              · <span className="font-mono">{drop}</span> point(s) consumed over
+              this range
+            </>
+          ) : null}
+          {minBatteryVoltage !== null && (
+            <>
+              {" "}
+              · VBAT{" "}
+              <span className="font-mono">
+                {minBatteryVoltage}–{maxBatteryVoltage}
+              </span>{" "}
+              mV
+            </>
+          )}
+          {batteryCount < total && (
+            <>
+              {" "}
+              · reported by{" "}
+              <span className="font-mono">{formatCount(batteryCount)}</span> of{" "}
+              <span className="font-mono">{formatCount(total)}</span> payloads
+              (V0 payloads carry no battery reading)
+            </>
+          )}
+        </p>
+      </figcaption>
+      <LineChart
+        timeline={timeline}
+        values={timeline.buckets.map((b) => b.meanBatterySoc)}
+        band={timeline.buckets.map((b) =>
+          b.minBatterySoc === null || b.maxBatterySoc === null
+            ? null
+            : [b.minBatterySoc, b.maxBatterySoc],
+        )}
+        scale={scale}
+        formatValue={formatCount}
+        valueName="%"
+      />
+    </figure>
+  );
+}
+
+// V1 radio coverage. RSRP is negative and closer to zero is better, so the
+// axis reads "less negative = stronger" — worth saying in the caption, because
+// the line going up meaning better signal is not obvious from a dBm axis.
+function SignalChart({ timeline }: { timeline: Timeline }) {
+  const { signalCount, minRsrp, maxRsrp, minSnr, maxSnr, total } = timeline;
+  const scale = niceScale(minRsrp ?? -140, maxRsrp ?? -44, { integer: true });
+
+  return (
+    <figure className="space-y-1">
+      <figcaption className="space-y-0.5">
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          <SignalHigh className="h-3.5 w-3.5 text-primary" />
+          Cellular coverage — RSRP (dBm)
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          Range{" "}
+          <span className="font-mono">
+            {minRsrp}–{maxRsrp}
+          </span>{" "}
+          dBm — higher (less negative) is stronger
+          {minSnr !== null && (
+            <>
+              {" "}
+              · SNR{" "}
+              <span className="font-mono">
+                {minSnr}–{maxSnr}
+              </span>{" "}
+              dB
+            </>
+          )}
+          {signalCount < total && (
+            <>
+              {" "}
+              · measured on{" "}
+              <span className="font-mono">{formatCount(signalCount)}</span> of{" "}
+              <span className="font-mono">{formatCount(total)}</span> payloads —
+              the rest reported 0, which the protocol defines as{" "}
+              &ldquo;not available&rdquo;
+            </>
+          )}
+          {" "}· these values describe the{" "}
+          <em>previous</em> transmission cycle, not the moment the report was
+          built
+        </p>
+      </figcaption>
+      <LineChart
+        timeline={timeline}
+        values={timeline.buckets.map((b) => b.meanRsrp)}
+        band={timeline.buckets.map((b) =>
+          b.minRsrp === null || b.maxRsrp === null
+            ? null
+            : [b.minRsrp, b.maxRsrp],
+        )}
+        scale={scale}
+        formatValue={formatCount}
+        valueName="dBm"
       />
     </figure>
   );

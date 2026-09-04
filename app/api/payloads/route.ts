@@ -15,9 +15,10 @@ function statusForDecodeError(code: string): number {
 /**
  * POST /api/payloads
  *
- * Receives a raw binary LoRaWAN V0 payload (preferably
- * `Content-Type: application/octet-stream`), decodes it and stores it in
- * Supabase (best-effort — a storage failure does not fail the decode).
+ * Receives a raw binary Onehop payload (preferably
+ * `Content-Type: application/octet-stream`), decodes it — V0 and V1 are both
+ * accepted, dispatched on the version byte — and stores it in Supabase
+ * (best-effort — a storage failure does not fail the decode).
  *
  * The response carries no body: the outcome is the HTTP status alone
  * (204 accepted, 4xx decode failure, 500 unexpected error). Decoded data is
@@ -57,6 +58,9 @@ export async function POST(request: NextRequest) {
           payload_binary: analysis.binary,
           byte_length: analysis.meta.byteLength,
           payload_version: decoded.payload_version,
+          // Null for V0, which carries no UID. Requires scripts/003 to have
+          // been run against the database.
+          device_uid: decoded.device_uid,
           sample_count: decoded.sample_count,
           samples: decoded.samples,
           context: decoded.context,

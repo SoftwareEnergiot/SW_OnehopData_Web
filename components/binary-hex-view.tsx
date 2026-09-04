@@ -1,10 +1,13 @@
 "use client";
 
-import type { AnnotatedByte } from "@/lib/payload-decoder";
+import type { AnnotatedByte, PayloadAnalysis } from "@/lib/payload-decoder";
 import { cn } from "@/lib/utils";
 
 interface BinaryHexViewProps {
   bytes: AnnotatedByte[];
+  // Section sizes differ per payload version (V0 is 2/28/8, V1 is 14/32/36),
+  // so the legend is labelled from the analysed payload rather than hardcoded.
+  meta?: PayloadAnalysis["meta"];
 }
 
 // Background/foreground classes for each protocol section, so the same byte is
@@ -62,13 +65,19 @@ function BytePanel({
   );
 }
 
-export function BinaryHexView({ bytes }: BinaryHexViewProps) {
+export function BinaryHexView({ bytes, meta }: BinaryHexViewProps) {
+  const headerSize = meta?.headerSize ?? 2;
+  const sampleSize = meta?.sampleSize ?? 28;
+  const contextSize = meta?.contextSize ?? 8;
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-4">
-        <LegendDot className="bg-sky-100" label="Header (2 B)" />
-        <LegendDot className="bg-emerald-100" label="Samples (28 B each)" />
-        <LegendDot className="bg-violet-100" label="Context (8 B)" />
+        <LegendDot className="bg-sky-100" label={`Header (${headerSize} B)`} />
+        <LegendDot
+          className="bg-emerald-100"
+          label={`Samples (${sampleSize} B each)`}
+        />
+        <LegendDot className="bg-violet-100" label={`Context (${contextSize} B)`} />
       </div>
       <div className="flex flex-col gap-4 lg:flex-row">
         <BytePanel title="Binary" bytes={bytes} render={(b) => b.binary} />

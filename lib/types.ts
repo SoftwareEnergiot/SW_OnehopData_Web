@@ -9,12 +9,25 @@ export interface PayloadRecord {
   payload_binary: string | null;
   byte_length: number;
   payload_version: number;
+  // Header device UID, "00:12:4B:…" — V1 and later only. Null for the V0 rows
+  // stored before the format carried one.
+  device_uid: string | null;
   sample_count: number;
   samples: DecodedSample[];
   context: DecodedContext;
   error_mask: number;
   errors: ResolvedError[];
   reporting_counter: number;
+  // V1 battery and radio diagnostics. These are columns generated from
+  // `context` by scripts/004 — the ingest endpoint never writes them directly.
+  // Null for V0 payloads, and absent entirely if that migration has not run.
+  battery_soc: number | null;
+  battery_voltage: number | null;
+  /** RSRP in dBm; 0 means "not available". */
+  rsrp: number | null;
+  /** SNR in dB; 0 means "not available". */
+  snr: number | null;
+  last_communication_error: number | null;
   source_ip: string | null;
   source_user_agent: string | null;
 }

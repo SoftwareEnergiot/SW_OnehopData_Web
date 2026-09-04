@@ -15,10 +15,18 @@ import {
 import { toast } from "sonner";
 import { FlaskConical, Send, Wand2 } from "lucide-react";
 
-// Canonical example payload from the protocol document — a friendly default so
-// the playground is useful on first load.
-const EXAMPLE_HEX =
+// Canonical example payloads from the protocol documents — friendly defaults so
+// the playground is useful on first load. V1 is the current device format; V0
+// is kept so legacy frames can still be pasted and decoded.
+const V1_EXAMPLE_HEX =
+  "0100124B001A2B3C4D012A000000" +
+  "EB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01" +
+  "180000000057AC0F030000000C0002000000A1FF0817C0A8000002000820000094110000";
+
+const V0_EXAMPLE_HEX =
   "0005BB00DA00D700BC008C020000000000000000C60016FD100200000000BB00BA00D700BC008C020000000000000000C60016FD110200000000BB00DA00D700BC008C020000000000000000C70016FD100200000000BA00DA00D700BC008C020000000000000000C60016FD110200000000BA00DA00D700BC008B020000000000000000C60016FD1102000000001800000000000000";
+
+const EXAMPLE_HEX = V1_EXAMPLE_HEX;
 
 export function PayloadPlayground() {
   const [hex, setHex] = useState(EXAMPLE_HEX);
@@ -99,8 +107,11 @@ export function PayloadPlayground() {
             />
             <p className="text-xs text-muted-foreground">
               Accepts spaces, <span className="font-mono">0x</span> prefixes and{" "}
-              <span className="font-mono">:</span> separators. Total length must
-              be <span className="font-mono">10 + 28 · N</span> bytes.
+              <span className="font-mono">:</span> separators. The version byte
+              selects the format: <span className="font-mono">01</span> → V1,{" "}
+              <span className="font-mono">82</span> bytes (14 header + 32 sample
+              + 36 context); <span className="font-mono">00</span> → V0,{" "}
+              <span className="font-mono">10 + 28 · N</span> bytes.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -118,11 +129,18 @@ export function PayloadPlayground() {
               {sending ? "Sending…" : "Send to endpoint"}
             </Button>
             <Button
-              onClick={() => setHex(EXAMPLE_HEX)}
+              onClick={() => setHex(V1_EXAMPLE_HEX)}
               variant="ghost"
               className="gap-2"
             >
-              Reset to example
+              V1 example
+            </Button>
+            <Button
+              onClick={() => setHex(V0_EXAMPLE_HEX)}
+              variant="ghost"
+              className="gap-2"
+            >
+              V0 example
             </Button>
           </div>
         </CardContent>
