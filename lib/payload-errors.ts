@@ -182,6 +182,68 @@ const RAT_NAMES: Record<number, string> = {
   2: "NB-IoT",
 };
 
+// Context field 7: reset source.
+//
+// The V1 document only says "MCU reset source register of the last boot" and
+// does not define the values. The MCU is a TI CC1352R (the payload UID is the
+// factory IEEE 802.15.4 MAC read from FCFG1, and the part datasheet is attached
+// to the same Confluence space), so these are the CC13x2/CC26x2 reset sources
+// as returned by driverlib SysCtrlResetSourceGet() — the AON_PMCTL:RESETCTL
+// RESET_SRC field, already shifted down to 0-7.
+//
+// UNVERIFIED AGAINST THE FIRMWARE: the mapping is inferred from the part, not
+// from the protocol document. Confirm it against the firmware before relying on
+// it operationally. The raw value is always shown alongside the label, and an
+// unrecognised value is reported as such instead of being guessed at.
+export interface ResetSourceDef {
+  value: number;
+  name: string;
+  description: string;
+}
+
+export const RESET_SOURCES: ResetSourceDef[] = [
+  { value: 0, name: "PWR_ON",               description: "Power-on reset — the device was powered up" },
+  { value: 1, name: "PIN_RESET",            description: "External reset pin asserted" },
+  { value: 2, name: "VDDS_LOSS",            description: "Brown-out: the VDDS supply dropped out" },
+  { value: 3, name: "VDDR_LOSS",            description: "Brown-out: the VDDR supply dropped out" },
+  { value: 4, name: "CLK_LOSS",             description: "Clock loss detected" },
+  { value: 5, name: "SYSRESET",             description: "Software reset requested by the firmware" },
+  { value: 6, name: "WARMRESET",            description: "Warm reset" },
+  { value: 7, name: "WAKEUP_FROM_SHUTDOWN", description: "Woke from shutdown mode" },
+];
+
+export interface ResolvedResetSource extends ResetSourceDef {
+  /** False when the value is outside the documented range and was not decoded. */
+  recognised: boolean;
+}
+
+export function resolveResetSource(value: number): ResolvedResetSource {
+  const raw = value >>> 0;
+  const def = RESET_SOURCES.find((d) => d.value === raw);
+  if (def) return { ...def, recognised: true };
+
+  // Anything above 7 is not a reset source in this encoding. The likeliest
+  // explanation is that the firmware sends the whole RESETCTL register rather
+  // than the extracted field — say so rather than decode the low bits and
+  // present a guess as a fact.
+  return {
+    value: raw,
+    name: "UNKNOWN",
+    description:
+      "Outside the documented range. The firmware may be sending the raw RESETCTL register instead of the decoded source.",
+    recognised: false,
+  };
+}
+
+/** "0x00000002 — VDDS_LOSS (brown-out…)", for a table cell. */
+export function describeResetSource(value: number): string {
+  const resolved = resolveResetSource(value);
+  const hex = `0x${(value >>> 0).toString(16).padStart(8, "0")}`;
+  return resolved.recognised
+    ? `${hex} — ${resolved.name}: ${resolved.description}`
+    : `${hex} — ${resolved.description}`;
+}
+
 export function resolveStatusFlags(value: number): string[] {
   const flags: string[] = [];
   if (value & 0x01) flags.push("PSM granted");

@@ -266,7 +266,15 @@ The V1 example payload above decodes to:
 - Helpers: `hexToBytes`, `bytesToHex`, `bytesToBinary`.
 
 Error codes are resolved via `lib/payload-errors.ts` (mirrors the *Error Codes*
-document and `scripts/002_create_payload_error_codes.sql`).
+document and `scripts/002_create_payload_error_codes.sql`). That module also
+resolves the V1 lookups: the valid sample mask, the last-communication-error
+enum, the modem status flags, and the reset source.
+
+`lib/payload-spec.test.ts` transcribes the V1 document tables literally and
+asserts the implementation against them — field order, types, factors, units,
+and that each section tiles its bytes exactly with no gap or overlap. When the
+protocol document changes, update that file first: the failures then point at
+every place the code has to follow.
 
 ---
 
