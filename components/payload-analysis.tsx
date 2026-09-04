@@ -19,6 +19,7 @@ import {
 } from "@/lib/payload-decoder";
 import {
   describeCommError,
+  describeResetSource,
   formatErrorMask,
   formatSampleMask,
   invalidSampleFields,
@@ -60,7 +61,7 @@ function describeContextValue(
     case "status_flags":
       return resolveStatusFlags(value).join(", ");
     case "reset_source":
-      return `0x${(value >>> 0).toString(16).padStart(8, "0")}`;
+      return describeResetSource(value);
     case "rsrp":
     case "snr":
       // The spec uses 0 as "not available" for both radio metrics.

@@ -126,6 +126,20 @@ The 36-byte V1 context: `error_mask` (`uint32`, offset 0),
 only while it registers on the network, so they describe the **previous**
 transmission cycle, not the instant the report was built.
 
+**`reset_source`** is stored as the raw `uint32` the device sends. The dashboard
+additionally labels it with the reset reason — `PWR_ON`, `PIN_RESET`,
+`VDDS_LOSS`, `VDDR_LOSS`, `CLK_LOSS`, `SYSRESET`, `WARMRESET`,
+`WAKEUP_FROM_SHUTDOWN` — the CC13x2/CC26x2 reset sources of the TI CC1352R the
+device is built on, as returned by driverlib `SysCtrlResetSourceGet()`.
+
+> The protocol document does not define these values; it only says "MCU reset
+> source register of the last boot". The mapping is inferred from the part and
+> is **pending confirmation against the firmware**. The raw hex is always shown
+> next to the label, and a value outside 0-7 is reported as unrecognised rather
+> than decoded — that would suggest the firmware sends the whole `RESETCTL`
+> register instead of the extracted field. The table lives in
+> `RESET_SOURCES` in `lib/payload-errors.ts`.
+
 > The reporting counter lives in the V1 **header**, not the context. It is
 > mirrored into the stored `context` object (and the `reporting_counter` column)
 > so both formats expose it in the same place.
