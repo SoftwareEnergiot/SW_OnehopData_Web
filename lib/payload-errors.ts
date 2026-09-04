@@ -96,3 +96,98 @@ export function resolveErrorMask(mask: number): ResolvedError[] {
 export function formatErrorMask(mask: number): string {
   return `0x${(mask >>> 0).toString(16).padStart(8, "0")}`;
 }
+
+// ---------------------------------------------------------------------------
+// V1 additions
+//
+// The V1 payload carries three further bit/enum fields that the V0 format did
+// not have: the per-sample "valid sample mask", the modem status flags, and the
+// last communication error enum. They are resolved here, next to the error
+// catalog, so every lookup table for the protocol lives in one module.
+// ---------------------------------------------------------------------------
+
+export interface ValidSampleBitDef {
+  bit: number;
+  label: string;
+  /** Sample channels whose values are only meaningful when this bit is set. */
+  fields: string[];
+}
+
+// Bit positions match the firmware sensor mask (V1 spec, "Valid sample mask").
+// A set bit means the sensor was read successfully; a clear bit means its
+// fields were transmitted as 0 and must be discarded, not read as a measurement.
+export const VALID_SAMPLE_BITS: ValidSampleBitDef[] = [
+  { bit: 0, label: "Ambient (external)",  fields: ["ambient_temperature", "ambient_humidity"] },
+  { bit: 1, label: "Luminosity",          fields: ["luminosity"] },
+  { bit: 2, label: "Accelerometer",       fields: ["acceleration_x", "acceleration_y", "acceleration_z"] },
+  { bit: 3, label: "Current 1",           fields: ["current_1_int_temp", "magnetic_field_1"] },
+  { bit: 4, label: "Current 2",           fields: ["current_2_int_temp", "magnetic_field_2"] },
+  { bit: 5, label: "Cable temperature 1", fields: ["thermocouple_1"] },
+  { bit: 6, label: "Cable temperature 2", fields: ["thermocouple_2"] },
+  { bit: 7, label: "Cable temperature 3", fields: [] }, // not used in v1, always 0
+  { bit: 8, label: "Ambient (internal)",  fields: ["internal_temperature", "internal_humidity"] },
+];
+
+export interface ResolvedValidSampleBit extends ValidSampleBitDef {
+  valid: boolean;
+}
+
+// Expand a valid-sample mask into one entry per known sensor bit, each marked
+// valid or not. Bits 9-15 are reserved and are not reported.
+export function resolveValidSampleMask(mask: number): ResolvedValidSampleBit[] {
+  const normalized = mask >>> 0;
+  return VALID_SAMPLE_BITS.map((def) => ({
+    ...def,
+    valid: (normalized & (1 << def.bit)) !== 0,
+  }));
+}
+
+// The set of sample channels that were NOT read successfully, so the UI can
+// mark their (zero) values as "no measurement" instead of showing a reading.
+export function invalidSampleFields(mask: number): Set<string> {
+  const invalid = new Set<string>();
+  for (const def of resolveValidSampleMask(mask)) {
+    if (!def.valid) {
+      for (const field of def.fields) invalid.add(field);
+    }
+  }
+  return invalid;
+}
+
+// Canonical "0x017f" form of a 16-bit mask.
+export function formatSampleMask(mask: number): string {
+  return `0x${(mask >>> 0).toString(16).padStart(4, "0")}`;
+}
+
+// Context field 2: last cellular error.
+export const COMM_ERRORS: Record<number, string> = {
+  0: "None",
+  1: "Attach",
+  2: "HTTP connect",
+  3: "HTTP request",
+  4: "Sleep",
+  5: "Clock",
+  6: "Unknown",
+};
+
+export function describeCommError(value: number): string {
+  return COMM_ERRORS[value] ?? `Unspecified (${value})`;
+}
+
+// Context field 10: modem status flags. bit0 PSM granted, bit1 PSM acceptable,
+// bit2 is attached, bits3-4 radio access technology, bits5-7 reserved.
+const RAT_NAMES: Record<number, string> = {
+  0: "RAT unknown",
+  1: "LTE-M",
+  2: "NB-IoT",
+};
+
+export function resolveStatusFlags(value: number): string[] {
+  const flags: string[] = [];
+  if (value & 0x01) flags.push("PSM granted");
+  if (value & 0x02) flags.push("PSM acceptable");
+  if (value & 0x04) flags.push("Attached");
+  const rat = (value >> 3) & 0x03;
+  flags.push(RAT_NAMES[rat] ?? `RAT ${rat}`);
+  return flags;
+}

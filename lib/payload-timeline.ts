@@ -8,6 +8,15 @@ export interface SummaryPoint {
   created_at: string;
   byte_length: number;
   reporting_counter: number;
+  // V1 battery and radio diagnostics, generated from `context` by scripts/004.
+  // Null or absent for V0 payloads (which carry no such fields) and for every
+  // payload if that migration has not been applied.
+  battery_soc?: number | null;
+  battery_voltage?: number | null;
+  /** RSRP in dBm. The firmware sends 0 for "not available". */
+  rsrp?: number | null;
+  /** SNR in dB. 0 also means "not available". */
+  snr?: number | null;
 }
 
 export interface TimelineBucket {
@@ -26,6 +35,21 @@ export interface TimelineBucket {
   maxCounter: number | null;
   /** Counter of the last payload in the bucket — the series the chart plots. */
   lastCounter: number | null;
+  /**
+   * Battery state of charge (%), null when no payload in the bucket reported
+   * one. A genuine 0 is a flat battery, not a missing reading, so zeros count.
+   */
+  minBatterySoc: number | null;
+  maxBatterySoc: number | null;
+  meanBatterySoc: number | null;
+  /** VBAT (mV) of the last payload in the bucket that reported one. */
+  lastBatteryVoltage: number | null;
+  /** RSRP (dBm) stats over the payloads that reported a usable (non-zero) one. */
+  minRsrp: number | null;
+  maxRsrp: number | null;
+  meanRsrp: number | null;
+  /** Mean SNR (dB) over the payloads that reported a usable (non-zero) one. */
+  meanSnr: number | null;
 }
 
 export interface Timeline {
@@ -45,6 +69,24 @@ export interface Timeline {
   /** Times the counter went backwards between consecutive payloads (a reset). */
   counterResets: number;
   /**
+   * Payloads in the domain that reported a battery reading. Zero means the
+   * range holds no V1 diagnostics (all V0, or scripts/004 not applied), and the
+   * battery chart is not worth drawing.
+   */
+  batteryCount: number;
+  minBatterySoc: number | null;
+  maxBatterySoc: number | null;
+  firstBatterySoc: number | null;
+  lastBatterySoc: number | null;
+  minBatteryVoltage: number | null;
+  maxBatteryVoltage: number | null;
+  /** Payloads that reported a usable (non-zero) RSRP. */
+  signalCount: number;
+  minRsrp: number | null;
+  maxRsrp: number | null;
+  minSnr: number | null;
+  maxSnr: number | null;
+  /**
    * True when the range needed more than MAX_BUCKETS buckets at this interval,
    * so only the most recent MAX_BUCKETS are plotted.
    */
@@ -62,6 +104,35 @@ interface TimelineOptions {
 // Ceiling on how many buckets a range may be cut into, so a narrow bucket over
 // a wide range cannot produce tens of thousands of marks.
 export const MAX_BUCKETS = 1500;
+
+// A real number, or null for anything missing (V0 rows, an un-migrated
+// database, a malformed value).
+function finiteOrNull(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+// Same, but treating 0 as "not available" — the convention the firmware uses
+// for RSRP and SNR. Plotting those zeros would draw a flat, very strong signal
+// exactly when there was no measurement at all.
+function availableOrNull(value: number | null | undefined): number | null {
+  const n = finiteOrNull(value);
+  return n === null || n === 0 ? null : n;
+}
+
+// Min/max/mean over the values that are present; all-null in, all-null out.
+function statsOf(values: (number | null)[]): {
+  min: number | null;
+  max: number | null;
+  mean: number | null;
+} {
+  const present = values.filter((v): v is number => v !== null);
+  if (present.length === 0) return { min: null, max: null, mean: null };
+  return {
+    min: Math.min(...present),
+    max: Math.max(...present),
+    mean: present.reduce((a, b) => a + b, 0) / present.length,
+  };
+}
 
 /**
  * Bucket payloads into fixed-width time slices (hourly by default).
@@ -86,6 +157,12 @@ export function buildTimeline(
       t: Date.parse(p.created_at),
       bytes: p.byte_length,
       counter: p.reporting_counter,
+      // V0 rows have no diagnostics at all; a V1 row can still omit a radio
+      // metric by sending 0, which the spec defines as "not available".
+      batterySoc: finiteOrNull(p.battery_soc),
+      batteryVoltage: finiteOrNull(p.battery_voltage),
+      rsrp: availableOrNull(p.rsrp),
+      snr: availableOrNull(p.snr),
     }))
     .filter((p) => Number.isFinite(p.t))
     .sort((a, b) => a.t - b.t);
@@ -131,9 +208,22 @@ export function buildTimeline(
     minCounter: null,
     maxCounter: null,
     lastCounter: null,
+    minBatterySoc: null,
+    maxBatterySoc: null,
+    meanBatterySoc: null,
+    lastBatteryVoltage: null,
+    minRsrp: null,
+    maxRsrp: null,
+    meanRsrp: null,
+    meanSnr: null,
   }));
 
   const sums = new Array<number>(n).fill(0);
+  // Per-bucket diagnostic readings, kept aside so each bucket's stats are
+  // computed only over the payloads that actually carried them.
+  const socByBucket: number[][] = Array.from({ length: n }, () => []);
+  const rsrpByBucket: number[][] = Array.from({ length: n }, () => []);
+  const snrByBucket: number[][] = Array.from({ length: n }, () => []);
   const inRange: typeof parsed = [];
 
   for (const point of parsed) {
@@ -157,10 +247,29 @@ export function buildTimeline(
       bucket.maxCounter === null ? counter : Math.max(bucket.maxCounter, counter);
     // Points are sorted, so the last one seen is the bucket's latest.
     bucket.lastCounter = counter;
+
+    if (point.batterySoc !== null) socByBucket[index].push(point.batterySoc);
+    if (point.batteryVoltage !== null) {
+      bucket.lastBatteryVoltage = point.batteryVoltage;
+    }
+    if (point.rsrp !== null) rsrpByBucket[index].push(point.rsrp);
+    if (point.snr !== null) snrByBucket[index].push(point.snr);
   }
 
   for (let i = 0; i < n; i++) {
     if (buckets[i].count > 0) buckets[i].meanBytes = sums[i] / buckets[i].count;
+
+    const soc = statsOf(socByBucket[i]);
+    buckets[i].minBatterySoc = soc.min;
+    buckets[i].maxBatterySoc = soc.max;
+    buckets[i].meanBatterySoc = soc.mean;
+
+    const rsrp = statsOf(rsrpByBucket[i]);
+    buckets[i].minRsrp = rsrp.min;
+    buckets[i].maxRsrp = rsrp.max;
+    buckets[i].meanRsrp = rsrp.mean;
+
+    buckets[i].meanSnr = statsOf(snrByBucket[i]).mean;
   }
 
   // A counter that goes backwards between consecutive payloads is a reset —
@@ -172,6 +281,18 @@ export function buildTimeline(
 
   const bytes = inRange.map((p) => p.bytes);
   const counters = inRange.map((p) => p.counter);
+
+  // Domain-wide diagnostic stats, over the payloads that reported each metric.
+  const socValues = inRange
+    .map((p) => p.batterySoc)
+    .filter((v): v is number => v !== null);
+  const soc = statsOf(socValues);
+  const voltage = statsOf(inRange.map((p) => p.batteryVoltage));
+  const rsrpValues = inRange
+    .map((p) => p.rsrp)
+    .filter((v): v is number => v !== null);
+  const rsrp = statsOf(rsrpValues);
+  const snr = statsOf(inRange.map((p) => p.snr));
 
   return {
     buckets,
@@ -186,6 +307,18 @@ export function buildTimeline(
     firstCounter: counters.length ? counters[0] : null,
     lastCounter: counters.length ? counters[counters.length - 1] : null,
     counterResets,
+    batteryCount: socValues.length,
+    minBatterySoc: soc.min,
+    maxBatterySoc: soc.max,
+    firstBatterySoc: socValues.length ? socValues[0] : null,
+    lastBatterySoc: socValues.length ? socValues[socValues.length - 1] : null,
+    minBatteryVoltage: voltage.min,
+    maxBatteryVoltage: voltage.max,
+    signalCount: rsrpValues.length,
+    minRsrp: rsrp.min,
+    maxRsrp: rsrp.max,
+    minSnr: snr.min,
+    maxSnr: snr.max,
     clamped,
   };
 }

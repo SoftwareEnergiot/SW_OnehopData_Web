@@ -444,6 +444,7 @@ export function ReceivedPayloads() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Received</TableHead>
+                    <TableHead>Device UID</TableHead>
                     <TableHead className="text-right">Ver.</TableHead>
                     <TableHead className="text-right">Samples</TableHead>
                     <TableHead>Error mask</TableHead>
@@ -460,6 +461,13 @@ export function ReceivedPayloads() {
                     >
                       <TableCell className="font-mono text-xs">
                         {formatCreatedAt(row.created_at)}
+                      </TableCell>
+                      {/* V0 payloads carry no UID, and neither do rows stored
+                          before scripts/003 added the column. */}
+                      <TableCell className="font-mono text-xs">
+                        {row.device_uid ?? (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </TableCell>
                       <TableCell className="text-right font-mono">
                         {row.payload_version}

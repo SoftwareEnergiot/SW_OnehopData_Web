@@ -43,7 +43,7 @@ const poppins = Poppins({
 
 export const metadata: Metadata = {
   title: 'Onehop Payload Platform',
-  description: 'Receive, decode and inspect LoRaWAN V0 binary payloads',
+  description: 'Testing platform for Onehop devices',
   generator: 'v0.app',
   icons: {
     icon: '/energiot_aplicacoes-07.png',

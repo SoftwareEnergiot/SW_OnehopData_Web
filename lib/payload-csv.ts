@@ -1,6 +1,12 @@
 import { formatCreatedAt } from "@/lib/utils";
-import { formatErrorMask } from "@/lib/payload-errors";
+import { describeCommError, formatErrorMask } from "@/lib/payload-errors";
 import type { PayloadRecord } from "@/lib/types";
+
+// Render a nullable numeric column: an absent reading is an empty cell, never a
+// zero, so a spreadsheet never averages "no data" in with real measurements.
+function numeric(value: number | null | undefined): string {
+  return value === null || value === undefined ? "" : String(value);
+}
 
 // A single exportable CSV column: a stable key, the header shown in the file
 // and the column-picker, and how to render a row's value as a string.
@@ -10,18 +16,34 @@ export interface CsvColumn {
   value: (row: PayloadRecord) => string;
 }
 
-// Every column the CSV can carry, in export order. The first six mirror the
+// Every column the CSV can carry, in export order. The first seven mirror the
 // on-screen table; the rest expose the raw decoded payload fields (complex
 // values are serialised as JSON so a single cell round-trips them). Request
 // metadata unrelated to the payload data (row id, source IP, user agent) is
 // deliberately left out.
 export const CSV_COLUMNS: CsvColumn[] = [
   { key: "created_at", label: "Received", value: (r) => formatCreatedAt(r.created_at) },
+  { key: "device_uid", label: "Device UID", value: (r) => r.device_uid ?? "" },
   { key: "payload_version", label: "Version", value: (r) => String(r.payload_version) },
   { key: "sample_count", label: "Samples", value: (r) => String(r.sample_count) },
   { key: "error_mask", label: "Error mask", value: (r) => formatErrorMask(r.error_mask) },
   { key: "reporting_counter", label: "Counter", value: (r) => String(r.reporting_counter) },
   { key: "byte_length", label: "Bytes", value: (r) => String(r.byte_length) },
+  // V1 diagnostics, generated from `context` by scripts/004. Empty for V0 rows
+  // and for any row stored before that migration — never "0", which would read
+  // as a flat battery or a lost signal rather than as "no reading".
+  { key: "battery_soc", label: "Battery SoC (%)", value: (r) => numeric(r.battery_soc) },
+  { key: "battery_voltage", label: "Battery voltage (mV)", value: (r) => numeric(r.battery_voltage) },
+  { key: "rsrp", label: "RSRP (dBm)", value: (r) => numeric(r.rsrp) },
+  { key: "snr", label: "SNR (dB)", value: (r) => numeric(r.snr) },
+  {
+    key: "last_communication_error",
+    label: "Last comm. error",
+    value: (r) =>
+      r.last_communication_error === null || r.last_communication_error === undefined
+        ? ""
+        : describeCommError(r.last_communication_error),
+  },
   { key: "payload_hex", label: "Payload hex", value: (r) => r.payload_hex },
   { key: "payload_binary", label: "Payload binary", value: (r) => r.payload_binary ?? "" },
   { key: "samples", label: "Samples (JSON)", value: (r) => JSON.stringify(r.samples ?? []) },

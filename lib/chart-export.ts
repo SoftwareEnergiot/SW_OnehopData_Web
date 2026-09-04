@@ -34,6 +34,15 @@ export function buildTimelineCsv(timeline: Timeline): string {
     "Counter (last)",
     "Min counter",
     "Max counter",
+    // V1 diagnostics. Empty for buckets whose payloads carried none.
+    "Battery SoC mean (%)",
+    "Min battery SoC (%)",
+    "Max battery SoC (%)",
+    "Battery voltage (mV)",
+    "RSRP mean (dBm)",
+    "Min RSRP (dBm)",
+    "Max RSRP (dBm)",
+    "SNR mean (dB)",
   ];
   const lines = [header.map(escapeCsvField).join(",")];
   for (const bucket of timeline.buckets) {
@@ -46,6 +55,14 @@ export function buildTimelineCsv(timeline: Timeline): string {
       cell(bucket.lastCounter),
       cell(bucket.minCounter),
       cell(bucket.maxCounter),
+      cell(bucket.meanBatterySoc, 1),
+      cell(bucket.minBatterySoc),
+      cell(bucket.maxBatterySoc),
+      cell(bucket.lastBatteryVoltage),
+      cell(bucket.meanRsrp, 1),
+      cell(bucket.minRsrp),
+      cell(bucket.maxRsrp),
+      cell(bucket.meanSnr, 1),
     ];
     lines.push(row.map(escapeCsvField).join(","));
   }

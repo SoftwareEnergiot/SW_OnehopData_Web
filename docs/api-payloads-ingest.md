@@ -1,8 +1,17 @@
 # `POST /api/payloads` — Payload Ingestion Endpoint
 
-Receives a **raw binary LoRaWAN V0 payload** from a device, decodes it according
-to the *Payload Encode - LoraWAN V0* protocol, and best-effort stores both the raw
-and decoded forms in Supabase.
+Receives a **raw binary Onehop payload** from a device, decodes it, and
+best-effort stores both the raw and decoded forms in Supabase.
+
+Two payload formats are accepted, selected by the **version byte at offset 0**:
+
+| Version byte | Format | Source document | Total length |
+| ------------ | ------ | --------------- | ------------ |
+| `0x00`       | V0     | *Payload Encode - LoraWAN V0*                | `10 + 28 · N` bytes |
+| `0x01`       | V1     | [Confluence — V1](https://energiot.atlassian.net/wiki/spaces/WSNFD/pages/670793729/V1) | `82` bytes (N = 1) |
+
+V1 is the current device format; V0 remains accepted so already-deployed
+devices keep working. Any other version byte is rejected with `400`.
 
 > **The response has no body.** The endpoint answers with an **HTTP status only** —
 > `204 No Content` when the payload was accepted, a `4xx` when it could not be
@@ -63,8 +72,65 @@ The following request headers, if present, are recorded with the stored payload
 
 ### Body
 
-The **raw binary payload** — not JSON, not base64, not a hex string. The byte
-layout (all multi-byte fields little-endian; `int16` two's-complement signed):
+The **raw binary payload** — not JSON, not base64, not a hex string. In both
+formats every multi-byte field is little-endian and `int8` / `int16` fields are
+two's-complement signed. The `device_uid` is a raw byte array sent in order, so
+it is never byte-swapped.
+
+#### V1 layout (version byte `0x01`)
+
+| Section  | Size          | Contents                                                                          |
+| -------- | ------------- | --------------------------------------------------------------------------------- |
+| Header   | 14 bytes      | version (`uint8`), device UID (`uint8[8]`), sample count (`uint8`), reporting counter (`uint32`) |
+| Samples  | 32 × N bytes  | N consecutive 32-byte samples (15 channels each)                                   |
+| Context  | 36 bytes      | error mask plus battery and modem diagnostics (14 fields)                          |
+
+**Total length = 82 bytes.** `sample_count` is **always 1** in V1 — a payload
+declaring any other count is rejected with `400`, even when its length agrees
+with the header. The field is kept in the format for v2, which will add the
+timestamping needed to place several samples in time.
+
+Each 32-byte V1 sample decodes to:
+
+| Field                  | Offset | Type     | Factor | Unit | Label                           |
+| ---------------------- | ------ | -------- | ------ | ---- | ------------------------------- |
+| `thermocouple_1`       | 0      | `int16`  | 10     | °C   | Cable temperature, probe 1      |
+| `thermocouple_2`       | 2      | `int16`  | 10     | °C   | Cable temperature, probe 2      |
+| `current_1_int_temp`   | 4      | `int16`  | 10     | °C   | Die temp of magnetic sensor 1   |
+| `current_2_int_temp`   | 6      | `int16`  | 10     | °C   | Die temp of magnetic sensor 2   |
+| `ambient_temperature`  | 8      | `int16`  | 10     | °C   | Outside the enclosure           |
+| `ambient_humidity`     | 10     | `uint16` | 10     | %RH  | Outside the enclosure           |
+| `internal_temperature` | 12     | `int16`  | 10     | °C   | Inside the enclosure            |
+| `internal_humidity`    | 14     | `uint16` | 10     | %RH  | Inside the enclosure            |
+| `luminosity`           | 16     | `uint32` | 1      | lux  | Ambient light                   |
+| `acceleration_x`       | 20     | `int16`  | 1      | mg   | Tilt / vibration                |
+| `acceleration_y`       | 22     | `int16`  | 1      | mg   | Tilt / vibration                |
+| `acceleration_z`       | 24     | `int16`  | 1      | mg   | Tilt / vibration                |
+| `magnetic_field_1`     | 26     | `uint16` | 1      | µT   | RMS field, sensor 1             |
+| `magnetic_field_2`     | 28     | `uint16` | 1      | µT   | RMS field, sensor 2             |
+| `valid_sample_mask`    | 30     | `uint16` | 1      | —    | Which sensors were read OK      |
+
+**Valid sample mask** — bit set = sensor read OK and its fields are valid; bit
+clear = its fields were transmitted as 0 and must be discarded, not read as a
+measurement. Bit 0 ambient (external), 1 luminosity, 2 accelerometer,
+3 current 1, 4 current 2, 5 cable temp 1, 6 cable temp 2, 7 cable temp 3
+(unused in V1, always 0), 8 ambient (internal); bits 9-15 reserved.
+
+The 36-byte V1 context: `error_mask` (`uint32`, offset 0),
+`last_communication_error` (`uint8`, 4), `battery_soc` (`uint8`, 5),
+`battery_voltage` (`uint16`, 6), `config_version` (`uint32`, 8),
+`boot_count` (`uint16`, 12), `reset_source` (`uint32`, 14), `rsrp` (`int16`, 18),
+`snr` (`int8`, 20), `status_flags` (`uint8`, 21), `tau` (`uint32`, 22),
+`active_time` (`uint16`, 26), `last_attach_duration_ms` (`uint32`, 28),
+`last_tx_duration_ms` (`uint32`, 32). The last seven are refreshed by the modem
+only while it registers on the network, so they describe the **previous**
+transmission cycle, not the instant the report was built.
+
+> The reporting counter lives in the V1 **header**, not the context. It is
+> mirrored into the stored `context` object (and the `reporting_counter` column)
+> so both formats expose it in the same place.
+
+#### V0 layout (version byte `0x00`)
 
 | Section  | Size          | Contents                                          |
 | -------- | ------------- | ------------------------------------------------- |
@@ -131,7 +197,19 @@ are logged server-side only.
 
 ## Examples
 
-### curl — canonical example payload (150 bytes, 5 samples)
+### curl — canonical V1 example payload (82 bytes, 1 sample)
+
+```bash
+echo -n "0100124B001A2B3C4D012A000000EB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01180000000057AC0F030000000C0002000000A1FF0817C0A8000002000820000094110000" \
+  | xxd -r -p \
+  | curl -s -o /dev/null -w '%{http_code}\n' \
+      -X POST https://onehop-data.vercel.app/api/payloads \
+      -H "Content-Type: application/octet-stream" \
+      --data-binary @-
+# → 204
+```
+
+### curl — canonical V0 example payload (150 bytes, 5 samples)
 
 The body must be sent as raw bytes. Convert a hex string to binary with `xxd -r -p`
 and stream it with `--data-binary @-`. There is no body to print, so ask curl for
@@ -181,6 +259,31 @@ Unparseable `from` / `to` values are ignored rather than erroring. Example:
 Response: `{ success, data: PayloadRecord[], total, limit, offset }` — `total` is
 the full count matching the filter (ignoring `limit`/`offset`), which is what the
 dashboard uses to page through the range.
+
+Each row carries `device_uid`, the V1 header UID formatted as uppercase
+colon-separated hex (`"00:12:4B:00:1A:2B:3C:4D"`). It is `null` for V0 payloads,
+which have no UID, and for any row stored before `scripts/003_add_device_uid.sql`
+was applied.
+
+Rows also carry `battery_soc`, `battery_voltage`, `rsrp`, `snr` and
+`last_communication_error` once `scripts/004_add_v1_diagnostics_columns.sql` has
+been applied. These are `GENERATED … STORED` columns derived from the `context`
+object, so they are always consistent with it and are `null` for V0 payloads.
+Every other V1 context field (`config_version`, `boot_count`, `reset_source`,
+`tau`, `active_time`, `last_attach_duration_ms`, `last_tx_duration_ms`) is
+available inside `context` itself.
+
+### `GET /api/payloads/summary` (chart series)
+
+Returns `{ success, points, total, truncated }` with one point per payload in
+the range, ordered oldest first: `created_at`, `byte_length`,
+`reporting_counter`, plus `battery_soc`, `battery_voltage`, `rsrp` and `snr`
+when script `004` has been applied. Takes the same `from` / `to` bounds.
+
+`rsrp` and `snr` are `0` when the modem had no measurement — the dashboard
+excludes those from the coverage statistics rather than charting them as an
+unusually strong signal. A `battery_soc` of `0`, by contrast, is a real reading
+(a flat battery) and is charted as such.
 
 `created_at` is returned as stored (UTC). The dashboard converts it to Madrid
 local time (`Europe/Madrid`, CET/CEST) for display — table stamps, chart axes and

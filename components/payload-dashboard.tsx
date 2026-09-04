@@ -25,7 +25,7 @@ export function PayloadDashboard() {
               Onehop Payload Platform
             </span>
             <span className="mt-1 text-xs text-muted-foreground">
-              Receive, decode and inspect LoRaWAN V0 binary payloads
+              Testing platform for Onehop devices
             </span>
           </div>
         </div>
