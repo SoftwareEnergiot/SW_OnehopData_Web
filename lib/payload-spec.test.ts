@@ -25,9 +25,11 @@ import {
 } from "@/lib/payload-decoder";
 import {
   COMM_ERRORS,
+  ERR_BIT_BAT_STATUS_UNKNOWN,
   RESET_SOURCES,
   VALID_SAMPLE_BITS,
   describeResetSource,
+  isBatterySocValid,
   resolveResetSource,
 } from "@/lib/payload-errors";
 
@@ -39,8 +41,8 @@ describe("V1 section sizes", () => {
   it("matches the Overview table", () => {
     expect(V1_HEADER_SIZE).toBe(14);
     expect(V1_SAMPLE_SIZE).toBe(32);
-    expect(V1_CONTEXT_SIZE).toBe(36);
-    expect(expectedLength(1, 1)).toBe(82);
+    expect(V1_CONTEXT_SIZE).toBe(40);
+    expect(expectedLength(1, 1)).toBe(86);
   });
 
   it("leaves V0 untouched", () => {
@@ -106,7 +108,7 @@ describe("V1 sample table", () => {
 });
 
 describe("V1 context table", () => {
-  // Ids 1-14 of the "Context" table: [key, type, unit].
+  // Ids 1-16 of the "Context" table: [key, type, unit].
   const SPEC = [
     ["error_mask",               "uint32", ""],
     ["last_communication_error", "uint8",  ""],
@@ -122,9 +124,11 @@ describe("V1 context table", () => {
     ["active_time",              "uint16", "s"],
     ["last_attach_duration_ms",  "uint32", "ms"],
     ["last_tx_duration_ms",      "uint32", "ms"],
+    ["reporting_lost_counter",   "uint16", ""],
+    ["tx_failed",                "uint16", ""],
   ] as const;
 
-  it("carries all 14 fields, in document order", () => {
+  it("carries all 16 fields, in document order", () => {
     expect(V1_CONTEXT_FIELDS.map((f) => f.key)).toEqual(SPEC.map(([key]) => key));
   });
 
@@ -135,7 +139,7 @@ describe("V1 context table", () => {
     }
   });
 
-  it("tiles the 36 bytes exactly, with no gap or overlap", () => {
+  it("tiles the 40 bytes exactly, with no gap or overlap", () => {
     let offset = 0;
     for (const field of V1_CONTEXT_FIELDS) {
       expect({ key: field.key, offset: field.offset }).toEqual({
@@ -196,6 +200,36 @@ describe("last communication error", () => {
       5: "Clock",
       6: "Unknown",
     });
+  });
+});
+
+describe("battery state of charge", () => {
+  // "A value of 0 together with bit 0x00040000 set in the error mask means the
+  // fuel gauge failed, not an empty battery." — Context table, field 3.
+  it("treats a plain 0 as a genuinely flat battery", () => {
+    expect(isBatterySocValid(0, 0)).toBe(true);
+    // Some other error being set does not change the reading.
+    expect(isBatterySocValid(0, 0x00000018)).toBe(true);
+  });
+
+  it("treats 0 with ERR_RSN_BAT_STATUS_UNKNOWN as no measurement", () => {
+    expect(ERR_BIT_BAT_STATUS_UNKNOWN).toBe(0x00040000);
+    expect(isBatterySocValid(0, ERR_BIT_BAT_STATUS_UNKNOWN)).toBe(false);
+    // The bit alongside other errors still means the gauge failed.
+    expect(isBatterySocValid(0, ERR_BIT_BAT_STATUS_UNKNOWN | 0x18)).toBe(false);
+  });
+
+  it("keeps a non-zero reading even when the gauge bit is set", () => {
+    expect(isBatterySocValid(87, ERR_BIT_BAT_STATUS_UNKNOWN)).toBe(true);
+  });
+
+  it("keeps a reading above 100, which the firmware does not clamp", () => {
+    expect(isBatterySocValid(104, 0)).toBe(true);
+  });
+
+  it("rejects a missing reading", () => {
+    expect(isBatterySocValid(null, 0)).toBe(false);
+    expect(isBatterySocValid(undefined, 0)).toBe(false);
   });
 });
 

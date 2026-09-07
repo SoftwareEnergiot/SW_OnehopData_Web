@@ -12,8 +12,8 @@
 //     Header  : 14 bytes       -> version (uint8), device UID (uint8[8]),
 //                                 sample count (uint8), reporting counter (uint32)
 //     Samples : 32 * N bytes   -> N consecutive 32-byte samples (N is always 1)
-//     Context : 36 bytes       -> error mask plus battery / modem diagnostics
-//     Total   = 82 bytes for N = 1
+//     Context : 40 bytes       -> error mask plus battery / modem diagnostics
+//     Total   = 86 bytes for N = 1
 //
 // In both formats every multi-byte integer is little-endian and int8/int16
 // fields are two's complement. The device UID is a raw byte array sent in
@@ -37,7 +37,7 @@ export const V0_CONTEXT_SIZE = 8;
 // --- V1 geometry -----------------------------------------------------------
 export const V1_HEADER_SIZE = 14;
 export const V1_SAMPLE_SIZE = 32;
-export const V1_CONTEXT_SIZE = 36;
+export const V1_CONTEXT_SIZE = 40;
 
 // Back-compat aliases: these names date from when V0 was the only format and
 // are still imported by existing callers and tests.
@@ -135,9 +135,15 @@ export const V0_CONTEXT_FIELDS: ContextFieldDef[] = [
   { key: "reporting_counter", label: "Reporting counter", offset: 4, type: "uint32", unit: "" },
 ];
 
-// The 14 fields of the fixed 36-byte V1 context. Fields 8-14 are refreshed by
-// the modem only while it registers on the network, so they describe the
-// *previous* transmission cycle, not the instant the report was built.
+// The 16 fields of the fixed 40-byte V1 context.
+//
+// Fields 8-14 are refreshed by the modem only while it registers on the
+// network, so they describe the *previous* transmission cycle, not the instant
+// the report was built.
+//
+// Fields 6, 15 and 16 are counters since boot: read them as a delta between
+// consecutive reports of the same boot session. Their wrap is harmless, and a
+// decreasing value means the device rebooted, which the boot count confirms.
 export const V1_CONTEXT_FIELDS: ContextFieldDef[] = [
   { key: "error_mask",               label: "Error mask",               offset: 0,  type: "uint32", unit: "" },
   { key: "last_communication_error", label: "Last communication error", offset: 4,  type: "uint8",  unit: "" },
@@ -153,6 +159,8 @@ export const V1_CONTEXT_FIELDS: ContextFieldDef[] = [
   { key: "active_time",              label: "Active time",              offset: 26, type: "uint16", unit: "s" },
   { key: "last_attach_duration_ms",  label: "Last attach duration",     offset: 28, type: "uint32", unit: "ms" },
   { key: "last_tx_duration_ms",      label: "Last TX duration",         offset: 32, type: "uint32", unit: "ms" },
+  { key: "reporting_lost_counter",   label: "Reporting lost counter",   offset: 36, type: "uint16", unit: "" },
+  { key: "tx_failed",                label: "Tx failed",                offset: 38, type: "uint16", unit: "" },
 ];
 
 // Kept for callers written against the single-format decoder. New code should

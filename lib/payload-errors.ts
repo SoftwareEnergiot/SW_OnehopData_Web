@@ -182,6 +182,29 @@ const RAT_NAMES: Record<number, string> = {
   2: "NB-IoT",
 };
 
+// ERR_RSN_BAT_STATUS_UNKNOWN. The V1 document defines a special case around it:
+// a battery_soc of 0 with this bit set means the fuel gauge failed, NOT an empty
+// battery. Charting that 0 as a reading would draw a cliff to zero every time
+// the gauge misbehaves.
+export const ERR_BIT_BAT_STATUS_UNKNOWN = 0x00040000;
+
+/**
+ * Whether a reported battery state of charge is an actual measurement.
+ *
+ * Returns false only for the documented fuel-gauge failure: a 0 accompanied by
+ * ERR_RSN_BAT_STATUS_UNKNOWN in the same report. A 0 on its own is a genuinely
+ * flat battery and stays a reading. The firmware does not clamp the gauge, so
+ * values above 100 are transmitted as-is and are also kept.
+ */
+export function isBatterySocValid(
+  soc: number | null | undefined,
+  errorMask: number | null | undefined,
+): boolean {
+  if (typeof soc !== "number" || !Number.isFinite(soc)) return false;
+  if (soc !== 0) return true;
+  return ((errorMask ?? 0) & ERR_BIT_BAT_STATUS_UNKNOWN) === 0;
+}
+
 // Context field 7: reset source.
 //
 // The V1 document only says "MCU reset source register of the last boot" and

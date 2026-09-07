@@ -150,7 +150,7 @@ const V1_HEADER_HEX = "0100124B001A2B3C4D012A000000";
 const V1_SAMPLE_HEX =
   "EB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01";
 const V1_CONTEXT_HEX =
-  "180000000057AC0F030000000C0002000000A1FF0817C0A8000002000820000094110000";
+  "180000000057AC0F030000000C0002000000A1FF0817C0A800000200082000009411000002000500";
 const V1_EXAMPLE_HEX = V1_HEADER_HEX + V1_SAMPLE_HEX + V1_CONTEXT_HEX;
 
 describe("decodePayload — V1 protocol example", () => {
@@ -200,6 +200,8 @@ describe("decodePayload — V1 protocol example", () => {
       active_time: 2,
       last_attach_duration_ms: 8200,
       last_tx_duration_ms: 4500,
+      reporting_lost_counter: 2,
+      tx_failed: 5,
       // Mirrored from the header so both formats expose it in one place.
       reporting_counter: 42,
     });
@@ -213,23 +215,23 @@ describe("decodePayload — V1 protocol example", () => {
     ]);
   });
 
-  it("annotates the 82 bytes into 14/32/36 sections", () => {
+  it("annotates the 86 bytes into 14/32/40 sections", () => {
     const analysis = analyzePayload(hexToBytes(V1_EXAMPLE_HEX));
-    expect(analysis.meta.byteLength).toBe(82);
+    expect(analysis.meta.byteLength).toBe(86);
     expect(analysis.meta.expectedLength).toBe(expectedLength(1, 1));
     expect(analysis.meta.headerSize).toBe(14);
     expect(analysis.meta.sampleSize).toBe(32);
-    expect(analysis.meta.contextSize).toBe(36);
+    expect(analysis.meta.contextSize).toBe(40);
     expect(analysis.bytes[13].section).toBe("header");
     expect(analysis.bytes[14].section).toBe("sample");
     expect(analysis.bytes[45].section).toBe("sample");
     expect(analysis.bytes[46].section).toBe("context");
-    expect(analysis.bytes[81].section).toBe("context");
+    expect(analysis.bytes[85].section).toBe("context");
   });
 });
 
 describe("V1 validation", () => {
-  it("rejects a V1 payload that is not 82 bytes", () => {
+  it("rejects a V1 payload that is not 86 bytes", () => {
     const bytes = hexToBytes(V1_EXAMPLE_HEX + "ff");
     try {
       decodePayload(bytes);
@@ -248,7 +250,7 @@ describe("V1 validation", () => {
       V1_SAMPLE_HEX +
       V1_CONTEXT_HEX;
     const bytes = hexToBytes(twoSamples);
-    expect(bytes.length).toBe(14 + 64 + 36);
+    expect(bytes.length).toBe(14 + 64 + 40);
     try {
       decodePayload(bytes);
       expect.unreachable();
@@ -283,7 +285,7 @@ describe("version dispatch", () => {
 
   it("sizes each version correctly", () => {
     expect(expectedLength(5, 0)).toBe(150);
-    expect(expectedLength(1, 1)).toBe(82);
+    expect(expectedLength(1, 1)).toBe(86);
     // Callers written before the format became version-dependent still get V0.
     expect(expectedLength(5)).toBe(150);
   });
