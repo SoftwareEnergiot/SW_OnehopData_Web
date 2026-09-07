@@ -36,6 +36,8 @@ export const CSV_COLUMNS: CsvColumn[] = [
   { key: "battery_voltage", label: "Battery voltage (mV)", value: (r) => numeric(r.battery_voltage) },
   { key: "rsrp", label: "RSRP (dBm)", value: (r) => numeric(r.rsrp) },
   { key: "snr", label: "SNR (dB)", value: (r) => numeric(r.snr) },
+  { key: "reporting_lost_counter", label: "Reports lost (since boot)", value: (r) => numeric(r.reporting_lost_counter) },
+  { key: "tx_failed", label: "Tx failed (since boot)", value: (r) => numeric(r.tx_failed) },
   {
     key: "last_communication_error",
     label: "Last comm. error",

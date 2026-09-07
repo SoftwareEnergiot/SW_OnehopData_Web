@@ -23,6 +23,7 @@ import {
   formatErrorMask,
   formatSampleMask,
   invalidSampleFields,
+  isBatterySocValid,
   resolveStatusFlags,
   resolveValidSampleMask,
 } from "@/lib/payload-errors";
@@ -52,7 +53,11 @@ function scaledValue(raw: number, factor: number): string {
 function describeContextValue(
   field: ContextFieldDef,
   value: number,
+  // Needed to tell a flat battery from a failed fuel gauge, which the spec
+  // distinguishes by a bit in the error mask of the same report.
+  errorMask: number,
 ): string | null {
+  const batterySocValid = isBatterySocValid(value, errorMask);
   switch (field.key) {
     case "error_mask":
       return formatErrorMask(value);
@@ -63,9 +68,21 @@ function describeContextValue(
     case "reset_source":
       return describeResetSource(value);
     case "rsrp":
-    case "snr":
-      // The spec uses 0 as "not available" for both radio metrics.
+      // The spec uses 0 as "not available".
       return value === 0 ? "not available" : null;
+    case "snr":
+      // 0 means "not available", but 0 dB is also a legal reading and v1
+      // carries no flag to tell the two apart. Say so rather than pick one.
+      return value === 0 ? "not available, or a genuine 0 dB" : null;
+    case "battery_soc":
+      // A 0 with the fuel-gauge bit set is a failed gauge, not a flat battery.
+      if (value === 0 && !batterySocValid) return "fuel gauge failed";
+      return value > 100 ? "above 100 — the firmware does not clamp the gauge" : null;
+    case "reporting_lost_counter":
+    case "tx_failed":
+    case "boot_count":
+      // Counters since boot: the useful reading is the delta between reports.
+      return "counter since boot";
     default:
       return null;
   }
@@ -311,7 +328,7 @@ function ContextSection({ analysis }: PayloadAnalysisViewProps) {
           <TableBody>
             {fields.map((field) => {
               const value = decoded.context[field.key] ?? 0;
-              const gloss = describeContextValue(field, value);
+              const gloss = describeContextValue(field, value, decoded.error_mask);
               return (
                 <TableRow key={field.key}>
                   <TableCell>

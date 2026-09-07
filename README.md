@@ -12,7 +12,7 @@ Two formats are supported, dispatched on the **version byte at offset 0**:
 
 | Version | Document | Total length | Device UID |
 | ------- | -------- | ------------ | ---------- |
-| **V1** (current) | [Confluence — V1](https://energiot.atlassian.net/wiki/spaces/WSNFD/pages/670793729/V1) | 82 bytes | yes |
+| **V1** (current) | [Confluence — V1](https://energiot.atlassian.net/wiki/spaces/WSNFD/pages/670793729/V1) | 86 bytes | yes |
 | **V0** (legacy)  | *Payload Encode - LoraWAN V0* | `10 + 28 · N` bytes | no |
 
 V0 stays supported so already-deployed devices keep working.
@@ -35,9 +35,9 @@ factor). The device UID is a raw byte array sent in order, never byte-swapped.
 | -------- | --------------- | ---------------------------------------------------------------------------- |
 | Header   | 14 bytes        | version (uint8), device UID (uint8[8]), sample count (uint8), reporting counter (uint32) |
 | Samples  | 32 × N bytes    | N consecutive 32-byte samples (15 channels each)                              |
-| Context  | 36 bytes        | error mask plus battery and modem diagnostics (14 fields)                     |
+| Context  | 40 bytes        | error mask plus battery, modem and reporting-loss diagnostics (16 fields)     |
 
-**Total length = 82 bytes.** `sample_count` is always **1**; a payload declaring
+**Total length = 86 bytes.** `sample_count` is always **1**; a payload declaring
 any other count is rejected, even when its length agrees with the header.
 
 Each 32-byte sample decodes to: `thermocouple_1`, `thermocouple_2`,
@@ -111,6 +111,7 @@ Supabase SQL editor or the CLI:
 # scripts/002_create_payload_error_codes.sql
 # scripts/003_add_device_uid.sql
 # scripts/004_add_v1_diagnostics_columns.sql
+# scripts/005_add_v1_reporting_loss_columns.sql
 ```
 
 They create the `payloads` table (with indexes on `created_at`,
@@ -145,12 +146,36 @@ and falls back to the reception series alone).
 | `payload_version`, `sample_count`, `reporting_counter`, `error_mask`, `errors`, `byte_length` | Columns (pre-existing) |
 | `device_uid` | Column (script `003`) |
 | `battery_soc`, `battery_voltage`, `rsrp`, `snr`, `last_communication_error` | Generated columns (script `004`) **and** `context` |
+| `reporting_lost_counter`, `tx_failed` | Generated columns (script `005`) **and** `context` |
 | The 15 sample channels, `valid_sample_mask` included | `samples` JSONB |
 | `config_version`, `boot_count`, `reset_source`, `tau`, `active_time`, `last_attach_duration_ms`, `last_tx_duration_ms` | `context` JSONB only |
 
 Nothing is dropped: every decoded field reaches the database. The JSONB-only
 fields are simply not indexed or typed — query them with `context->>'field'`, or
 promote one to a generated column by copying a line from script `004`.
+
+Script `005` does the same for the two counters added by the V1 context revision
+(36 → 40 bytes). Like `004` it is **optional and not deployment-order
+sensitive**: both fields already reach the database inside `context` as soon as
+the decoder understands them, and the script only makes them cheap to query.
+
+### Reading the V1 counters and the battery
+
+Three readings need care, and the dashboard already applies these rules:
+
+- `boot_count`, `reporting_lost_counter` and `tx_failed` are **counters since
+  boot**. Read them as a delta between consecutive reports of the same boot
+  session; a decreasing value means the device rebooted. The charts sum only the
+  increases, so a reboot does not count backwards.
+- `battery_soc` is **not clamped** — a gauge reading above 100 is sent as-is. A
+  `0` **with** bit `0x00040000` (`ERR_RSN_BAT_STATUS_UNKNOWN`) set in the same
+  report means the **fuel gauge failed**, not an empty battery, and is excluded
+  from the battery chart. A `0` without that bit is a genuinely flat battery and
+  is charted.
+- `snr` uses `0` for "not available", but 0 dB is also a legal reading and v1
+  carries no flag to separate them. Zeros are excluded from the coverage stats,
+  which loses a real 0 dB reading in the process. v2 adds an explicit validity
+  flag for the radio metrics.
 
 ### Run locally
 
@@ -175,8 +200,8 @@ npm run dev      # http://localhost:3000
 ### Example (curl) — V1
 
 ```bash
-# The canonical example payload from the V1 document (82 bytes, 1 sample).
-echo -n "0100124B001A2B3C4D012A000000EB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01180000000057AC0F030000000C0002000000A1FF0817C0A8000002000820000094110000" \
+# The canonical example payload from the V1 document (86 bytes, 1 sample).
+echo -n "0100124B001A2B3C4D012A000000EB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01180000000057AC0F030000000C0002000000A1FF0817C0A800000200082000009411000002000500" \
   | xxd -r -p \
   | curl -s -o /dev/null -w '%{http_code}\n' \
       -X POST http://localhost:3000/api/payloads \
@@ -232,6 +257,7 @@ The V1 example payload above decodes to:
     "rsrp": -95, "snr": 8, "status_flags": 23,
     "tau": 43200, "active_time": 2,
     "last_attach_duration_ms": 8200, "last_tx_duration_ms": 4500,
+    "reporting_lost_counter": 2, "tx_failed": 5,
     "reporting_counter": 42 // mirrored from the header
   },
   "error_mask_hex": "0x00000018",

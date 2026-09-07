@@ -28,6 +28,11 @@ export interface PayloadRecord {
   /** SNR in dB; 0 means "not available". */
   snr: number | null;
   last_communication_error: number | null;
+  // Counters since boot, added by the V1 context revision (36 -> 40 bytes) and
+  // exposed as columns by scripts/005. Read them as a delta between consecutive
+  // reports of the same boot session.
+  reporting_lost_counter: number | null;
+  tx_failed: number | null;
   source_ip: string | null;
   source_user_agent: string | null;
 }

@@ -3,6 +3,7 @@
 // Kept free of React/DOM so they can be unit-tested directly.
 
 import { toDisplayClock } from "@/lib/timezone";
+import { isBatterySocValid } from "@/lib/payload-errors";
 
 export interface SummaryPoint {
   created_at: string;
@@ -15,8 +16,19 @@ export interface SummaryPoint {
   battery_voltage?: number | null;
   /** RSRP in dBm. The firmware sends 0 for "not available". */
   rsrp?: number | null;
-  /** SNR in dB. 0 also means "not available". */
+  /**
+   * SNR in dB. The firmware sends 0 for "not available", but 0 dB is also a
+   * legal reading and v1 carries no flag to tell the two apart — so a genuine
+   * 0 dB is dropped here. v2 adds an explicit validity flag for the radio
+   * metrics, which is what will resolve the ambiguity.
+   */
   snr?: number | null;
+  /** Needed to tell a flat battery from a failed fuel gauge (see isBatterySocValid). */
+  error_mask?: number | null;
+  /** Reports that will never reach the server, accumulated since boot. */
+  reporting_lost_counter?: number | null;
+  /** Failed send attempts since boot. */
+  tx_failed?: number | null;
 }
 
 export interface TimelineBucket {
@@ -80,6 +92,13 @@ export interface Timeline {
   lastBatterySoc: number | null;
   minBatteryVoltage: number | null;
   maxBatteryVoltage: number | null;
+  /**
+   * Reports the device says it lost across this range, and failed send
+   * attempts, both summed from the per-report counter deltas. Null when no
+   * payload in the range reported them (V0, or a firmware before they existed).
+   */
+  reportsLost: number | null;
+  txFailed: number | null;
   /** Payloads that reported a usable (non-zero) RSRP. */
   signalCount: number;
   minRsrp: number | null;
@@ -117,6 +136,25 @@ function finiteOrNull(value: number | null | undefined): number | null {
 function availableOrNull(value: number | null | undefined): number | null {
   const n = finiteOrNull(value);
   return n === null || n === 0 ? null : n;
+}
+
+/**
+ * Total accumulated by a since-boot counter across a series of reports.
+ *
+ * The V1 document says to read these as a delta between consecutive reports of
+ * the same boot session: a decreasing value means the device rebooted (or the
+ * uint16 wrapped), so only the increases are summed. Returns null when no
+ * report in the range carried the counter.
+ */
+function sumCounterDeltas(values: (number | null)[]): number | null {
+  const present = values.filter((v): v is number => v !== null);
+  if (present.length === 0) return null;
+  let total = 0;
+  for (let i = 1; i < present.length; i++) {
+    const delta = present[i] - present[i - 1];
+    if (delta > 0) total += delta;
+  }
+  return total;
 }
 
 // Min/max/mean over the values that are present; all-null in, all-null out.
@@ -159,10 +197,16 @@ export function buildTimeline(
       counter: p.reporting_counter,
       // V0 rows have no diagnostics at all; a V1 row can still omit a radio
       // metric by sending 0, which the spec defines as "not available".
-      batterySoc: finiteOrNull(p.battery_soc),
+      // A battery 0 is a flat battery unless the fuel-gauge-failure bit says
+      // otherwise, in which case there was no measurement at all.
+      batterySoc: isBatterySocValid(p.battery_soc, p.error_mask)
+        ? finiteOrNull(p.battery_soc)
+        : null,
       batteryVoltage: finiteOrNull(p.battery_voltage),
       rsrp: availableOrNull(p.rsrp),
       snr: availableOrNull(p.snr),
+      lost: finiteOrNull(p.reporting_lost_counter),
+      txFailed: finiteOrNull(p.tx_failed),
     }))
     .filter((p) => Number.isFinite(p.t))
     .sort((a, b) => a.t - b.t);
@@ -295,6 +339,8 @@ export function buildTimeline(
   const snr = statsOf(inRange.map((p) => p.snr));
 
   return {
+    reportsLost: sumCounterDeltas(inRange.map((p) => p.lost)),
+    txFailed: sumCounterDeltas(inRange.map((p) => p.txFailed)),
     buckets,
     start,
     end,

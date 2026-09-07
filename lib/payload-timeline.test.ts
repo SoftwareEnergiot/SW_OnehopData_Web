@@ -284,8 +284,9 @@ const v1Point = (
   diagnostics: Partial<SummaryPoint> = {},
 ): SummaryPoint => ({
   created_at: iso,
-  byte_length: 82,
+  byte_length: 86,
   reporting_counter: 0,
+  error_mask: 0,
   battery_soc: 87,
   battery_voltage: 4012,
   rsrp: -95,
@@ -372,6 +373,71 @@ describe("buildTimeline — V1 diagnostics", () => {
     // caption can say "reported by 1 of 2 payloads".
     expect(timeline.batteryCount).toBe(1);
     expect(timeline.buckets[0].meanBatterySoc).toBe(80);
+  });
+});
+
+describe("buildTimeline — V1 context revision", () => {
+  it("excludes a battery 0 that the error mask marks as a failed gauge", () => {
+    const timeline = buildTimeline(
+      [
+        v1Point("2026-07-13T00:10:00Z", { battery_soc: 80 }),
+        // A flat-looking 0 that is really "the fuel gauge did not answer".
+        v1Point("2026-07-13T00:20:00Z", {
+          battery_soc: 0,
+          error_mask: 0x00040000,
+        }),
+      ],
+      { bucketMs: HOUR },
+    )!;
+    expect(timeline.batteryCount).toBe(1);
+    expect(timeline.minBatterySoc).toBe(80);
+    // Without this the chart would draw a cliff from 80 % to 0 %.
+    expect(timeline.buckets[0].meanBatterySoc).toBe(80);
+  });
+
+  it("keeps a battery 0 that is a genuinely flat battery", () => {
+    const timeline = buildTimeline(
+      [v1Point("2026-07-13T00:10:00Z", { battery_soc: 0, error_mask: 0x18 })],
+      { bucketMs: HOUR },
+    )!;
+    expect(timeline.batteryCount).toBe(1);
+    expect(timeline.minBatterySoc).toBe(0);
+  });
+
+  it("sums the lost-report counter as a delta across the range", () => {
+    const timeline = buildTimeline(
+      [
+        v1Point("2026-07-13T00:10:00Z", { reporting_lost_counter: 2, tx_failed: 2 }),
+        v1Point("2026-07-13T00:20:00Z", { reporting_lost_counter: 5, tx_failed: 5 }),
+        v1Point("2026-07-13T00:30:00Z", { reporting_lost_counter: 6, tx_failed: 6 }),
+      ],
+      { bucketMs: HOUR },
+    )!;
+    // 2 -> 5 -> 6 is four lost reports over the range, not six.
+    expect(timeline.reportsLost).toBe(4);
+    expect(timeline.txFailed).toBe(4);
+  });
+
+  it("ignores the drop across a reboot rather than counting it backwards", () => {
+    const timeline = buildTimeline(
+      [
+        v1Point("2026-07-13T00:10:00Z", { reporting_lost_counter: 9 }),
+        // The device rebooted: the counter starts over.
+        v1Point("2026-07-13T00:20:00Z", { reporting_lost_counter: 0 }),
+        v1Point("2026-07-13T00:30:00Z", { reporting_lost_counter: 3 }),
+      ],
+      { bucketMs: HOUR },
+    )!;
+    expect(timeline.reportsLost).toBe(3);
+  });
+
+  it("reports null when nothing in the range carried the counters", () => {
+    const timeline = buildTimeline(
+      [point("2026-07-13T00:10:00Z"), point("2026-07-13T00:20:00Z")],
+      { bucketMs: HOUR },
+    )!;
+    expect(timeline.reportsLost).toBeNull();
+    expect(timeline.txFailed).toBeNull();
   });
 });
 

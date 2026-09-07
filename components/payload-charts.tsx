@@ -493,6 +493,35 @@ function CounterChart({ timeline }: { timeline: Timeline }) {
               drop is the counter starting over
             </>
           )}
+          {/* V1 explains its own gaps: the device counts the reports it knows
+              it lost, which is what a jump in this series means. */}
+          {timeline.reportsLost !== null && (
+            <>
+              {" "}
+              ·{" "}
+              {timeline.reportsLost === 0 ? (
+                "the device reports no lost payloads over this range"
+              ) : (
+                <>
+                  the device reports{" "}
+                  <span className="font-mono">
+                    {formatCount(timeline.reportsLost)}
+                  </span>{" "}
+                  lost payload(s) here
+                  {timeline.txFailed !== null && timeline.txFailed > 0 && (
+                    <>
+                      , after{" "}
+                      <span className="font-mono">
+                        {formatCount(timeline.txFailed)}
+                      </span>{" "}
+                      failed send attempt(s)
+                    </>
+                  )}{" "}
+                  — that accounts for the gaps in the counter
+                </>
+              )}
+            </>
+          )}
         </p>
       </figcaption>
       <LineChart
@@ -526,7 +555,14 @@ function BatteryChart({ timeline }: { timeline: Timeline }) {
     maxBatteryVoltage,
     total,
   } = timeline;
-  const scale = niceScale(0, 100, { zeroBased: true, integer: true });
+  // Pinned to 0-100 rather than fitted to the data, so a battery drifting
+  // 87 -> 85 % reads as the near-flat line it is instead of a cliff. The
+  // firmware does not clamp the gauge, so a reading above 100 extends the axis
+  // rather than being clipped off the top of the plot.
+  const scale = niceScale(0, Math.max(100, maxBatterySoc ?? 100), {
+    zeroBased: true,
+    integer: true,
+  });
   const drop =
     firstBatterySoc !== null && lastBatterySoc !== null
       ? firstBatterySoc - lastBatterySoc
@@ -566,10 +602,11 @@ function BatteryChart({ timeline }: { timeline: Timeline }) {
           {batteryCount < total && (
             <>
               {" "}
-              · reported by{" "}
+              · measured on{" "}
               <span className="font-mono">{formatCount(batteryCount)}</span> of{" "}
-              <span className="font-mono">{formatCount(total)}</span> payloads
-              (V0 payloads carry no battery reading)
+              <span className="font-mono">{formatCount(total)}</span> payloads —
+              the rest either carry no battery reading (V0) or reported a failed
+              fuel gauge, which is excluded rather than charted as 0 %
             </>
           )}
         </p>

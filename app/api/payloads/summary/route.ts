@@ -13,11 +13,23 @@ const MAX_POINTS = 20000;
 // one response, so every extra column is paid for on every payload. The battery
 // and radio columns are generated from `context` by scripts/004 — a database
 // without that migration simply has no such columns, which is handled below.
-const CHART_COLUMNS =
-  "created_at,byte_length,reporting_counter,battery_soc,battery_voltage,rsrp,snr";
-
-// The subset that exists before scripts/004 has been applied.
-const BASE_COLUMNS = "created_at,byte_length,reporting_counter";
+// Progressively smaller column sets, richest first. Each generated-column
+// migration adds a tier, and the query walks down the list until the database
+// accepts one — so a database missing scripts/005 still charts everything
+// scripts/004 provides, instead of falling all the way back to reception only.
+//
+// error_mask belongs to the original schema, so it is in every tier: the battery
+// series needs it to tell a flat battery from a failed fuel gauge.
+const BASE_COLUMNS = "created_at,byte_length,reporting_counter,error_mask";
+const COLUMN_TIERS = [
+  // scripts/005: the reporting-loss counters.
+  BASE_COLUMNS +
+    ",battery_soc,battery_voltage,rsrp,snr,reporting_lost_counter,tx_failed",
+  // scripts/004: battery and radio diagnostics.
+  BASE_COLUMNS + ",battery_soc,battery_voltage,rsrp,snr",
+  // Original schema only.
+  BASE_COLUMNS,
+];
 
 /**
  * GET /api/payloads/summary
@@ -55,15 +67,19 @@ export async function GET(request: NextRequest) {
       created_at: string;
       byte_length: number;
       reporting_counter: number;
+      error_mask?: number | null;
       battery_soc?: number | null;
       battery_voltage?: number | null;
       rsrp?: number | null;
       snr?: number | null;
+      reporting_lost_counter?: number | null;
+      tx_failed?: number | null;
     }[] = [];
     let truncated = false;
-    // Downgraded to BASE_COLUMNS once the database tells us the diagnostic
-    // columns are not there (scripts/004 not applied).
-    let columns = CHART_COLUMNS;
+    // Index into COLUMN_TIERS. Steps down once the database tells us a tier
+    // names a column it does not have, and stays there for the rest of the
+    // paging loop so the downgrade is probed once, not per chunk.
+    let tier = 0;
 
     for (let offset = 0; offset < MAX_POINTS; offset += CHUNK) {
       const runQuery = async (select: string) => {
@@ -79,16 +95,17 @@ export async function GET(request: NextRequest) {
         return query;
       };
 
-      let { data, error } = await runQuery(columns);
+      let { data, error } = await runQuery(COLUMN_TIERS[tier]);
 
-      // PostgREST reports an unknown column as 42703. Fall back to the columns
-      // that have always existed rather than failing the whole chart panel.
-      if (error && columns !== BASE_COLUMNS && error.code === "42703") {
+      // PostgREST reports an unknown column as 42703. Step down one tier at a
+      // time rather than dropping straight to the base columns, so a database
+      // missing only the newest migration keeps the charts it can still serve.
+      while (error && error.code === "42703" && tier < COLUMN_TIERS.length - 1) {
+        tier += 1;
         console.warn(
-          "Payload summary: diagnostic columns missing (run scripts/004); charting reception only.",
+          `Payload summary: a diagnostic column is missing (run the migrations in scripts/); retrying with tier ${tier}.`,
         );
-        columns = BASE_COLUMNS;
-        ({ data, error } = await runQuery(columns));
+        ({ data, error } = await runQuery(COLUMN_TIERS[tier]));
       }
 
       if (error) {

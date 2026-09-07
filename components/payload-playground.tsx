@@ -21,7 +21,7 @@ import { FlaskConical, Send, Wand2 } from "lucide-react";
 const V1_EXAMPLE_HEX =
   "0100124B001A2B3C4D012A000000" +
   "EB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01" +
-  "180000000057AC0F030000000C0002000000A1FF0817C0A8000002000820000094110000";
+  "180000000057AC0F030000000C0002000000A1FF0817C0A800000200082000009411000002000500";
 
 const V0_EXAMPLE_HEX =
   "0005BB00DA00D700BC008C020000000000000000C60016FD100200000000BB00BA00D700BC008C020000000000000000C60016FD110200000000BB00DA00D700BC008C020000000000000000C70016FD100200000000BA00DA00D700BC008C020000000000000000C60016FD110200000000BA00DA00D700BC008B020000000000000000C60016FD1102000000001800000000000000";
@@ -109,8 +109,8 @@ export function PayloadPlayground() {
               Accepts spaces, <span className="font-mono">0x</span> prefixes and{" "}
               <span className="font-mono">:</span> separators. The version byte
               selects the format: <span className="font-mono">01</span> → V1,{" "}
-              <span className="font-mono">82</span> bytes (14 header + 32 sample
-              + 36 context); <span className="font-mono">00</span> → V0,{" "}
+              <span className="font-mono">86</span> bytes (14 header + 32 sample
+              + 40 context); <span className="font-mono">00</span> → V0,{" "}
               <span className="font-mono">10 + 28 · N</span> bytes.
             </p>
           </div>
