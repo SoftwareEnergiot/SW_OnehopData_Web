@@ -37,6 +37,10 @@ export const PAYLOAD_ERRORS: PayloadErrorDef[] = [
   { bit: 0x00020000, code: "0x00020000", name: "ERR_RSN_BAT_DISABLED",           description: "Battery disabled as a precautionary measure",          color: "#7f1d1d" },
   { bit: 0x00040000, code: "0x00040000", name: "ERR_RSN_BAT_STATUS_UNKNOWN",     description: "Can not determine the status of the battery.",         color: "#52525b" },
   { bit: 0x00080000, code: "0x00080000", name: "ERR_RSN_SCAP_UNBALANCED",        description: "Supercapacitors disconnected. Unbalanced detected.",   color: "#1e293b" },
+  // Added by the V1 revision that introduced the sample time.
+  { bit: 0x00100000, code: "0x00100000", name: "ERR_RSN_BOOT_COUNT_NOT_STORED",  description: "This boot's boot count could not be persisted and may repeat on the next boot.", color: "#6d28d9" },
+  { bit: 0x00200000, code: "0x00200000", name: "ERR_RSN_CLOCK_JUMP",             description: "A clock sync moved the clock by more than 120 s; sample times around it may be off by that much.", color: "#be185d" },
+  { bit: 0x00400000, code: "0x00400000", name: "ERR_RSN_CLOCK_SYNC_FAILED",      description: "No valid clock in a cycle: modem clock invalid and NTP failed. That cycle's report was most likely lost too.", color: "#9f1239" },
 ];
 
 export const PAYLOAD_ERROR_BY_NAME = new Map(PAYLOAD_ERRORS.map((e) => [e.name, e]));
@@ -168,6 +172,7 @@ export const COMM_ERRORS: Record<number, string> = {
   4: "Sleep",
   5: "Clock",
   6: "Unknown",
+  7: "Payload not sent: it contains the modem data-mode terminator (+++)",
 };
 
 export function describeCommError(value: number): string {
@@ -267,12 +272,28 @@ export function describeResetSource(value: number): string {
     : `${hex} — ${resolved.description}`;
 }
 
-export function resolveStatusFlags(value: number): string[] {
+// Status flags bits 6-7: where the last clock sync came from.
+export const TIME_SOURCES: Record<number, string> = {
+  0: "no clock sync",
+  1: "modem clock",
+  2: "NTP",
+  3: "manual",
+};
+
+// Bits 5-7 were reserved in the earlier V1 revisions and are always 0 there, so
+// decoding them unconditionally is safe: an old payload simply reads as
+// "uptime, no clock sync". Pass describeTime = false to leave them out for a
+// format that has no sample time and where they would only be noise.
+export function resolveStatusFlags(value: number, describeTime = true): string[] {
   const flags: string[] = [];
   if (value & 0x01) flags.push("PSM granted");
   if (value & 0x02) flags.push("PSM acceptable");
   if (value & 0x04) flags.push("Attached");
   const rat = (value >> 3) & 0x03;
   flags.push(RAT_NAMES[rat] ?? `RAT ${rat}`);
+  if (describeTime) {
+    flags.push(value & 0x20 ? "time UTC" : "time since boot");
+    flags.push(`source ${TIME_SOURCES[(value >> 6) & 0x03]}`);
+  }
   return flags;
 }

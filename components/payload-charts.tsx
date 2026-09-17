@@ -89,9 +89,15 @@ const PAD = { top: 12, right: 16, bottom: 24, left: 56 };
 interface PayloadChartsProps {
   /** Bumped by the parent's Refresh button to force a refetch. */
   refreshKey: number;
+  /**
+   * The table's device filter, applied to the charts too: unlike the time
+   * range, it is not independent, because a battery or coverage line that
+   * interleaves several devices would be meaningless. "" charts every device.
+   */
+  deviceUid: string;
 }
 
-export function PayloadCharts({ refreshKey }: PayloadChartsProps) {
+export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
   const [points, setPoints] = useState<SummaryPoint[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -116,6 +122,7 @@ export function PayloadCharts({ refreshKey }: PayloadChartsProps) {
     const params = new URLSearchParams();
     if (fromBound) params.set("from", fromBound);
     if (toBound) params.set("to", toBound);
+    if (deviceUid) params.set("device_uid", deviceUid);
 
     fetch(`/api/payloads/summary?${params.toString()}`, { cache: "no-store" })
       .then((response) => response.json())
@@ -139,7 +146,7 @@ export function PayloadCharts({ refreshKey }: PayloadChartsProps) {
     return () => {
       cancelled = true;
     };
-  }, [fromBound, toBound, refreshKey]);
+  }, [fromBound, toBound, deviceUid, refreshKey]);
 
   const timeline = useMemo(
     () =>

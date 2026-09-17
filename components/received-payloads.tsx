@@ -35,7 +35,15 @@ import { analyzePayload, hexToBytes } from "@/lib/payload-decoder";
 import { formatErrorMask } from "@/lib/payload-errors";
 import { createdAtBoundFromInput, formatCreatedAt } from "@/lib/utils";
 import { CSV_COLUMNS, buildCsv, downloadCsv } from "@/lib/payload-csv";
+import { NO_DEVICE_UID } from "@/lib/payload-filters";
 import type { PayloadRecord } from "@/lib/types";
+
+// One entry of GET /api/payloads/devices.
+interface DeviceOption {
+  device_uid: string;
+  payloads: number;
+  last_seen: string;
+}
 import { toast } from "sonner";
 import {
   ChevronLeft,
@@ -69,6 +77,12 @@ export function ReceivedPayloads() {
   // the created_at values shown in the table.
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  // Device filter: "" = every device, NO_DEVICE_UID = payloads without a UID
+  // (V0), otherwise a canonical "00:12:4B:…" UID. Shared with the charts, since
+  // one battery or coverage line drawn across several devices means nothing.
+  const [deviceUid, setDeviceUid] = useState("");
+  const [devices, setDevices] = useState<DeviceOption[]>([]);
+  const [devicesWithoutUid, setDevicesWithoutUid] = useState(false);
   // Paging through every stored payload in the selected range.
   const [pageSize, setPageSize] = useState(50);
   const [page, setPage] = useState(0);
@@ -98,6 +112,7 @@ export function ReceivedPayloads() {
       if (fromBound) params.set("from", fromBound);
       const toBound = createdAtBoundFromInput(to, "to");
       if (toBound) params.set("to", toBound);
+      if (deviceUid) params.set("device_uid", deviceUid);
 
       const response = await fetch(`/api/payloads?${params.toString()}`, {
         cache: "no-store",
@@ -115,11 +130,30 @@ export function ReceivedPayloads() {
     } finally {
       setLoading(false);
     }
-  }, [from, to, page, pageSize]);
+  }, [from, to, deviceUid, page, pageSize]);
 
   useEffect(() => {
     fetchPayloads();
   }, [fetchPayloads]);
+
+  // The devices the filter can offer. Refetched on Refresh, so a device that
+  // sends its first payload shows up without reloading the page.
+  const fetchDevices = useCallback(async () => {
+    try {
+      const response = await fetch("/api/payloads/devices", { cache: "no-store" });
+      const result = await response.json();
+      if (result.success) {
+        setDevices(result.devices ?? []);
+        setDevicesWithoutUid(Boolean(result.withoutUid));
+      }
+    } catch {
+      // The list is a convenience; the table still works without it.
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchDevices();
+  }, [fetchDevices]);
 
   // Land on the requested edge of a page the inspector just navigated into.
   useEffect(() => {
@@ -141,6 +175,13 @@ export function ReceivedPayloads() {
     setPage(0);
   }, []);
 
+  const changeDevice = useCallback((value: string) => {
+    setDeviceUid(value);
+    setPage(0);
+    // The inspected payload may belong to another device.
+    setSelectedId(null);
+  }, []);
+
   const changePageSize = useCallback((value: number) => {
     setPageSize(value);
     setPage(0);
@@ -149,6 +190,7 @@ export function ReceivedPayloads() {
   const clearFilter = useCallback(() => {
     setFrom("");
     setTo("");
+    setDeviceUid("");
     setPage(0);
   }, []);
 
@@ -190,6 +232,7 @@ export function ReceivedPayloads() {
       if (fromBound) params.set("from", fromBound);
       const toBound = createdAtBoundFromInput(to, "to");
       if (toBound) params.set("to", toBound);
+      if (deviceUid) params.set("device_uid", deviceUid);
 
       const response = await fetch(`/api/payloads?${params.toString()}`, {
         cache: "no-store",
@@ -207,7 +250,7 @@ export function ReceivedPayloads() {
       offset += EXPORT_CHUNK;
     }
     return all;
-  }, [from, to]);
+  }, [from, to, deviceUid]);
 
   // Gather the full range and download it as CSV using the selected columns.
   const handleDownloadCsv = useCallback(async () => {
@@ -234,7 +277,7 @@ export function ReceivedPayloads() {
     }
   }, [fetchAllInRange, selectedColumns]);
 
-  const hasFilter = from !== "" || to !== "";
+  const hasFilter = from !== "" || to !== "" || deviceUid !== "";
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const firstRowNumber = total === 0 ? 0 : page * pageSize + 1;
   const lastRowNumber = page * pageSize + rows.length;
@@ -275,7 +318,9 @@ export function ReceivedPayloads() {
   return (
     <div className="space-y-6">
       {/* This filter scopes the table below. The charts carry their own
-          independent range so previous data can be viewed on them alone. */}
+          independent time range so previous data can be viewed on them alone,
+          but they follow the device filter: mixing devices in one battery or
+          coverage line would be meaningless. */}
       <Card>
         <CardContent className="flex flex-wrap items-end gap-3">
           <div className="grid gap-1.5">
@@ -304,6 +349,35 @@ export function ReceivedPayloads() {
               className="w-auto"
             />
           </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="device-uid" className="text-xs text-muted-foreground">
+              Device
+            </Label>
+            <select
+              id="device-uid"
+              value={deviceUid}
+              onChange={(e) => changeDevice(e.target.value)}
+              className="h-9 min-w-56 rounded-md border border-input bg-transparent px-3 py-1 font-mono text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            >
+              <option value="">All devices</option>
+              {devices.map((device) => (
+                <option key={device.device_uid} value={device.device_uid}>
+                  {device.device_uid} ({device.payloads})
+                </option>
+              ))}
+              {/* V0 payloads carry no UID; offered only when some exist. */}
+              {devicesWithoutUid && (
+                <option value={NO_DEVICE_UID}>No UID (V0)</option>
+              )}
+              {/* Keep a selected device listed even if a refresh no longer
+                  returns it, so the control never shows a value it lacks. */}
+              {deviceUid !== "" &&
+                deviceUid !== NO_DEVICE_UID &&
+                !devices.some((d) => d.device_uid === deviceUid) && (
+                  <option value={deviceUid}>{deviceUid}</option>
+                )}
+            </select>
+          </div>
           {hasFilter && (
             <Button
               variant="ghost"
@@ -320,6 +394,7 @@ export function ReceivedPayloads() {
             size="sm"
             onClick={() => {
               fetchPayloads();
+              fetchDevices();
               setRefreshKey((k) => k + 1);
             }}
             className="ml-auto gap-2"
@@ -330,7 +405,7 @@ export function ReceivedPayloads() {
         </CardContent>
       </Card>
 
-      <PayloadCharts refreshKey={refreshKey} />
+      <PayloadCharts refreshKey={refreshKey} deviceUid={deviceUid} />
 
       <Card>
         <CardHeader>
@@ -429,7 +504,7 @@ export function ReceivedPayloads() {
           ) : rows.length === 0 ? (
             hasFilter ? (
               <p className="py-8 text-center text-sm text-muted-foreground">
-                No payloads received in the selected time range.
+                No payloads match the selected filter.
               </p>
             ) : (
               <p className="py-8 text-center text-sm text-muted-foreground">

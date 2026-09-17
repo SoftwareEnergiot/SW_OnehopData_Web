@@ -12,7 +12,7 @@ Two formats are supported, dispatched on the **version byte at offset 0**:
 
 | Version | Document | Total length | Device UID |
 | ------- | -------- | ------------ | ---------- |
-| **V1** (current) | [Confluence — V1](https://energiot.atlassian.net/wiki/spaces/WSNFD/pages/670793729/V1) | 86 bytes | yes |
+| **V1** (current) | [Confluence — V1](https://energiot.atlassian.net/wiki/spaces/WSNFD/pages/670793729/V1) | 93 bytes | yes |
 | **V0** (legacy)  | *Payload Encode - LoraWAN V0* | `10 + 28 · N` bytes | no |
 
 V0 stays supported so already-deployed devices keep working.
@@ -34,17 +34,27 @@ factor). The device UID is a raw byte array sent in order, never byte-swapped.
 | Section  | Size            | Contents                                                                     |
 | -------- | --------------- | ---------------------------------------------------------------------------- |
 | Header   | 14 bytes        | version (uint8), device UID (uint8[8]), sample count (uint8), reporting counter (uint32) |
-| Samples  | 32 × N bytes    | N consecutive 32-byte samples (15 channels each)                              |
-| Context  | 40 bytes        | error mask plus battery, modem and reporting-loss diagnostics (16 fields)     |
+| Samples  | 36 × N bytes    | N consecutive 36-byte samples (read time + 15 channels each)                 |
+| Context  | 43 bytes        | error mask plus battery, modem, reporting-loss and config diagnostics (17 fields) |
 
-**Total length = 86 bytes.** `sample_count` is always **1**; a payload declaring
-any other count is rejected, even when its length agrees with the header.
+**Total length = 93 bytes** for the single sample devices send in practice.
 
-Each 32-byte sample decodes to: `thermocouple_1`, `thermocouple_2`,
+The V1 document was revised twice **without changing the version byte** — 82
+bytes, then 86, then the current 93. Stored payloads and devices on older
+firmware use the earlier shapes, so all three still decode; the revision is told
+apart by total length (unambiguous for any sample count) and shown in the
+dashboard.
+
+Each 36-byte sample decodes to: `time`, `thermocouple_1`, `thermocouple_2`,
 `current_1_int_temp`, `current_2_int_temp`, `ambient_temperature`,
 `ambient_humidity`, `internal_temperature`, `internal_humidity`, `luminosity`,
 `acceleration_x`, `acceleration_y`, `acceleration_z`, `magnetic_field_1`,
 `magnetic_field_2`, `valid_sample_mask`.
+
+`time` is when the sample's read started. Bit 5 of `status_flags` says what it
+is: set, **UTC seconds since 1970**; clear, **seconds since boot** (no clock sync
+yet), in which case the reception time is the one to use. The dashboard shows
+the UTC time on the Madrid clock, or the uptime with that note.
 
 The `valid_sample_mask` says which sensors were read successfully. Fields of a
 sensor whose bit is clear were transmitted as 0 and must be **discarded**, not
@@ -147,8 +157,12 @@ and falls back to the reception series alone).
 | `device_uid` | Column (script `003`) |
 | `battery_soc`, `battery_voltage`, `rsrp`, `snr`, `last_communication_error` | Generated columns (script `004`) **and** `context` |
 | `reporting_lost_counter`, `tx_failed` | Generated columns (script `005`) **and** `context` |
-| The 15 sample channels, `valid_sample_mask` included | `samples` JSONB |
-| `config_version`, `boot_count`, `reset_source`, `tau`, `active_time`, `last_attach_duration_ms`, `last_tx_duration_ms` | `context` JSONB only |
+| The 16 sample channels, `time` and `valid_sample_mask` included | `samples` JSONB |
+| `config_crc32`, `boot_count`, `reset_source`, `status_flags`, `tau`, `active_time`, `last_attach_duration_ms`, `last_tx_duration_ms`, `last_poll_status` | `context` JSONB only |
+
+The sample-time revision needs **no schema change**: `time` lands in `samples`
+and the new context fields in `context`. Every generated column from `004` and
+`005` reads a key whose name did not change, so they keep working.
 
 Nothing is dropped: every decoded field reaches the database. The JSONB-only
 fields are simply not indexed or typed — query them with `context->>'field'`, or
@@ -163,10 +177,11 @@ the decoder understands them, and the script only makes them cheap to query.
 
 Three readings need care, and the dashboard already applies these rules:
 
-- `boot_count`, `reporting_lost_counter` and `tx_failed` are **counters since
-  boot**. Read them as a delta between consecutive reports of the same boot
-  session; a decreasing value means the device rebooted. The charts sum only the
-  increases, so a reboot does not count backwards.
+- `reporting_lost_counter` and `tx_failed` are **counters since boot**. Read
+  them as a delta between consecutive reports of the same boot session; a
+  decreasing value means the device rebooted. The charts sum only the increases,
+  so a reboot does not count backwards. `boot_count` itself is a **lifetime**
+  count (uint32), never cleared, not even by a factory reset.
 - `battery_soc` is **not clamped** — a gauge reading above 100 is sent as-is. A
   `0` **with** bit `0x00040000` (`ERR_RSN_BAT_STATUS_UNKNOWN`) set in the same
   report means the **fuel gauge failed**, not an empty battery, and is excluded
@@ -200,8 +215,8 @@ npm run dev      # http://localhost:3000
 ### Example (curl) — V1
 
 ```bash
-# The canonical example payload from the V1 document (86 bytes, 1 sample).
-echo -n "0100124B001A2B3C4D012A000000EB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01180000000057AC0F030000000C0002000000A1FF0817C0A800000200082000009411000002000500" \
+# The canonical example payload from the V1 document (93 bytes, 1 sample).
+echo -n "0100124B001A2B3C4D012A000000A068AA6AEB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01180000000057AC0FEFCDAB890C00000002000000A1FF08B7C0A80000020008200000941100000200050000" \
   | xxd -r -p \
   | curl -s -o /dev/null -w '%{http_code}\n' \
       -X POST http://localhost:3000/api/payloads \
@@ -235,11 +250,14 @@ The V1 example payload above decodes to:
 ```jsonc
 {
   "payload_version": 1,
+  "layout_revision": "v1",
   "device_uid": "00:12:4B:00:1A:2B:3C:4D",
   "sample_count": 1,
   "reporting_counter": 42,
+  "sample_time_utc": true, // status_flags bit 5
   "samples": [
     {
+      "time": 1789552800, // 2026-09-16 10:00:00 UTC
       "thermocouple_1": 235, "thermocouple_2": 241,
       "current_1_int_temp": 220, "current_2_int_temp": 223,
       "ambient_temperature": 188, "ambient_humidity": 652,
@@ -253,11 +271,12 @@ The V1 example payload above decodes to:
   "context": {
     "error_mask": 24, "last_communication_error": 0,
     "battery_soc": 87, "battery_voltage": 4012,
-    "config_version": 3, "boot_count": 12, "reset_source": 2,
-    "rsrp": -95, "snr": 8, "status_flags": 23,
+    "config_crc32": 2309737967, "boot_count": 12, "reset_source": 2,
+    "rsrp": -95, "snr": 8,
+    "status_flags": 183, // 0xB7: PSM granted + acceptable, attached, NB-IoT, time UTC, NTP
     "tau": 43200, "active_time": 2,
     "last_attach_duration_ms": 8200, "last_tx_duration_ms": 4500,
-    "reporting_lost_counter": 2, "tx_failed": 5,
+    "reporting_lost_counter": 2, "tx_failed": 5, "last_poll_status": 0,
     "reporting_counter": 42 // mirrored from the header
   },
   "error_mask_hex": "0x00000018",

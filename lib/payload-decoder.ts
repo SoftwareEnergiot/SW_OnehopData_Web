@@ -1,6 +1,6 @@
 // Reusable decoder for the Onehop binary uplink payloads.
 //
-// Two formats are supported, dispatched on the version byte at offset 0:
+// The version byte at offset 0 selects the format:
 //
 //   V0 ("Payload Encode - LoraWAN V0")
 //     Header  :  2 bytes       -> payload id/version (uint8), sample count (uint8)
@@ -8,15 +8,24 @@
 //     Context :  8 bytes       -> error mask (uint32), reporting counter (uint32)
 //     Total   = 10 + 28*N bytes
 //
-//   V1 (Confluence "V1", space WSNFD)
+//   V1 (Confluence "V1", space WSNFD) — current revision
 //     Header  : 14 bytes       -> version (uint8), device UID (uint8[8]),
 //                                 sample count (uint8), reporting counter (uint32)
-//     Samples : 32 * N bytes   -> N consecutive 32-byte samples (N is always 1)
-//     Context : 40 bytes       -> error mask plus battery / modem diagnostics
-//     Total   = 86 bytes for N = 1
+//     Samples : 36 * N bytes   -> N consecutive 36-byte samples, each starting
+//                                 with its read time (N is 1 in practice)
+//     Context : 43 bytes       -> error mask plus battery / modem diagnostics
+//     Total   = 93 bytes for N = 1
 //
-// In both formats every multi-byte integer is little-endian and int8/int16
-// fields are two's complement. The device UID is a raw byte array sent in
+// The V1 document has been revised twice WITHOUT changing the version byte:
+// 82 bytes (32-byte sample, 36-byte context), then 86 bytes (40-byte context),
+// then the current 93 bytes. Payloads of the earlier revisions are already in
+// the database and may still be sent by devices on older firmware, so all three
+// are decoded. Within V1 the revision is told apart by total length, which is
+// unambiguous: 50 + 32a, 54 + 32b and 57 + 36c never coincide for any sample
+// counts (each pairwise difference would have to be odd or a non-multiple).
+//
+// In every format multi-byte integers are little-endian and int8/int16 fields
+// are two's complement. The device UID is a raw byte array sent in canonical
 // order, not an integer, so it is never byte-swapped.
 //
 // The protocol documents are the source of truth; this module mirrors them and
@@ -34,10 +43,10 @@ export const V0_HEADER_SIZE = 2;
 export const V0_SAMPLE_SIZE = 28;
 export const V0_CONTEXT_SIZE = 8;
 
-// --- V1 geometry -----------------------------------------------------------
+// --- V1 geometry (current revision) ---------------------------------------
 export const V1_HEADER_SIZE = 14;
-export const V1_SAMPLE_SIZE = 32;
-export const V1_CONTEXT_SIZE = 40;
+export const V1_SAMPLE_SIZE = 36;
+export const V1_CONTEXT_SIZE = 43;
 
 // Back-compat aliases: these names date from when V0 was the only format and
 // are still imported by existing callers and tests.
@@ -111,40 +120,66 @@ export const V0_SAMPLE_FIELDS: SampleFieldDef[] = [
   { key: "current2",     label: "Current 2",            offset: 26, type: "uint16", factor: 1,  unit: "uT" },
 ];
 
-// The 15 channels of a 32-byte V1 sample. Field ids 1-15 in the V1 document.
+// The 16 channels of a 36-byte V1 sample (current revision). Field ids 1-16 in
+// the V1 document. `time` comes first and shifts every measurement by 4 bytes
+// relative to the earlier revisions.
 export const V1_SAMPLE_FIELDS: SampleFieldDef[] = [
-  { key: "thermocouple_1",       label: "Thermocouple 1",                 offset: 0,  type: "int16",  factor: 10, unit: "C" },
-  { key: "thermocouple_2",       label: "Thermocouple 2",                 offset: 2,  type: "int16",  factor: 10, unit: "C" },
-  { key: "current_1_int_temp",   label: "Current 1 internal temperature", offset: 4,  type: "int16",  factor: 10, unit: "C" },
-  { key: "current_2_int_temp",   label: "Current 2 internal temperature", offset: 6,  type: "int16",  factor: 10, unit: "C" },
-  { key: "ambient_temperature",  label: "Ambient temperature",            offset: 8,  type: "int16",  factor: 10, unit: "C" },
-  { key: "ambient_humidity",     label: "Ambient humidity",               offset: 10, type: "uint16", factor: 10, unit: "%RH" },
-  { key: "internal_temperature", label: "Internal temperature",           offset: 12, type: "int16",  factor: 10, unit: "C" },
-  { key: "internal_humidity",    label: "Internal humidity",              offset: 14, type: "uint16", factor: 10, unit: "%RH" },
-  { key: "luminosity",           label: "Luminosity",                     offset: 16, type: "uint32", factor: 1,  unit: "lux" },
-  { key: "acceleration_x",       label: "Acceleration X",                 offset: 20, type: "int16",  factor: 1,  unit: "mg" },
-  { key: "acceleration_y",       label: "Acceleration Y",                 offset: 22, type: "int16",  factor: 1,  unit: "mg" },
-  { key: "acceleration_z",       label: "Acceleration Z",                 offset: 24, type: "int16",  factor: 1,  unit: "mg" },
-  { key: "magnetic_field_1",     label: "Magnetic field 1",               offset: 26, type: "uint16", factor: 1,  unit: "uT" },
-  { key: "magnetic_field_2",     label: "Magnetic field 2",               offset: 28, type: "uint16", factor: 1,  unit: "uT" },
-  { key: "valid_sample_mask",    label: "Valid sample mask",              offset: 30, type: "uint16", factor: 1,  unit: "" },
+  { key: "time",                 label: "Time",                           offset: 0,  type: "uint32", factor: 1,  unit: "s" },
+  { key: "thermocouple_1",       label: "Thermocouple 1",                 offset: 4,  type: "int16",  factor: 10, unit: "C" },
+  { key: "thermocouple_2",       label: "Thermocouple 2",                 offset: 6,  type: "int16",  factor: 10, unit: "C" },
+  { key: "current_1_int_temp",   label: "Current 1 internal temperature", offset: 8,  type: "int16",  factor: 10, unit: "C" },
+  { key: "current_2_int_temp",   label: "Current 2 internal temperature", offset: 10, type: "int16",  factor: 10, unit: "C" },
+  { key: "ambient_temperature",  label: "Ambient temperature",            offset: 12, type: "int16",  factor: 10, unit: "C" },
+  { key: "ambient_humidity",     label: "Ambient humidity",               offset: 14, type: "uint16", factor: 10, unit: "%RH" },
+  { key: "internal_temperature", label: "Internal temperature",           offset: 16, type: "int16",  factor: 10, unit: "C" },
+  { key: "internal_humidity",    label: "Internal humidity",              offset: 18, type: "uint16", factor: 10, unit: "%RH" },
+  { key: "luminosity",           label: "Luminosity",                     offset: 20, type: "uint32", factor: 1,  unit: "lux" },
+  { key: "acceleration_x",       label: "Acceleration X",                 offset: 24, type: "int16",  factor: 1,  unit: "mg" },
+  { key: "acceleration_y",       label: "Acceleration Y",                 offset: 26, type: "int16",  factor: 1,  unit: "mg" },
+  { key: "acceleration_z",       label: "Acceleration Z",                 offset: 28, type: "int16",  factor: 1,  unit: "mg" },
+  { key: "magnetic_field_1",     label: "Magnetic field 1",               offset: 30, type: "uint16", factor: 1,  unit: "uT" },
+  { key: "magnetic_field_2",     label: "Magnetic field 2",               offset: 32, type: "uint16", factor: 1,  unit: "uT" },
+  { key: "valid_sample_mask",    label: "Valid sample mask",              offset: 34, type: "uint16", factor: 1,  unit: "" },
 ];
 
-export const V0_CONTEXT_FIELDS: ContextFieldDef[] = [
-  { key: "error_mask",        label: "Error mask",        offset: 0, type: "uint32", unit: "" },
-  { key: "reporting_counter", label: "Reporting counter", offset: 4, type: "uint32", unit: "" },
-];
-
-// The 16 fields of the fixed 40-byte V1 context.
+// The 17 fields of the fixed 43-byte V1 context (current revision).
 //
 // Fields 8-14 are refreshed by the modem only while it registers on the
 // network, so they describe the *previous* transmission cycle, not the instant
 // the report was built.
 //
-// Fields 6, 15 and 16 are counters since boot: read them as a delta between
-// consecutive reports of the same boot session. Their wrap is harmless, and a
-// decreasing value means the device rebooted, which the boot count confirms.
+// Fields 15 and 16 are counters since boot: read them as a delta between
+// consecutive reports of the same boot session. boot_count is NOT one of them
+// any more — it is a lifetime count, never cleared.
 export const V1_CONTEXT_FIELDS: ContextFieldDef[] = [
+  { key: "error_mask",               label: "Error mask",               offset: 0,  type: "uint32", unit: "" },
+  { key: "last_communication_error", label: "Last communication error", offset: 4,  type: "uint8",  unit: "" },
+  { key: "battery_soc",              label: "Battery SoC",              offset: 5,  type: "uint8",  unit: "%" },
+  { key: "battery_voltage",          label: "Battery voltage",          offset: 6,  type: "uint16", unit: "mV" },
+  { key: "config_crc32",             label: "Config CRC32",             offset: 8,  type: "uint32", unit: "" },
+  { key: "boot_count",               label: "Boot count",               offset: 12, type: "uint32", unit: "" },
+  { key: "reset_source",             label: "Reset source",             offset: 16, type: "uint32", unit: "" },
+  { key: "rsrp",                     label: "RSRP",                     offset: 20, type: "int16",  unit: "dBm" },
+  { key: "snr",                      label: "SNR",                      offset: 22, type: "int8",   unit: "dB" },
+  { key: "status_flags",             label: "Status flags",             offset: 23, type: "uint8",  unit: "" },
+  { key: "tau",                      label: "TAU",                      offset: 24, type: "uint32", unit: "s" },
+  { key: "active_time",              label: "Active time",              offset: 28, type: "uint16", unit: "s" },
+  { key: "last_attach_duration_ms",  label: "Last attach duration",     offset: 30, type: "uint32", unit: "ms" },
+  { key: "last_tx_duration_ms",      label: "Last TX duration",         offset: 34, type: "uint32", unit: "ms" },
+  { key: "reporting_lost_counter",   label: "Reporting lost counter",   offset: 38, type: "uint16", unit: "" },
+  { key: "tx_failed",                label: "Tx failed",                offset: 40, type: "uint16", unit: "" },
+  { key: "last_poll_status",         label: "Last poll status",         offset: 42, type: "uint8",  unit: "" },
+];
+
+// --- Earlier V1 revisions, kept so stored payloads and older firmware decode --
+
+// The 32-byte sample of the 82- and 86-byte revisions: no time field.
+export const V1_LEGACY_SAMPLE_FIELDS: SampleFieldDef[] = V1_SAMPLE_FIELDS.filter(
+  (f) => f.key !== "time",
+).map((f) => ({ ...f, offset: f.offset - 4 }));
+
+// The 36-byte context of the original 82-byte revision.
+const V1_REV_82_CONTEXT_FIELDS: ContextFieldDef[] = [
   { key: "error_mask",               label: "Error mask",               offset: 0,  type: "uint32", unit: "" },
   { key: "last_communication_error", label: "Last communication error", offset: 4,  type: "uint8",  unit: "" },
   { key: "battery_soc",              label: "Battery SoC",              offset: 5,  type: "uint8",  unit: "%" },
@@ -159,12 +194,18 @@ export const V1_CONTEXT_FIELDS: ContextFieldDef[] = [
   { key: "active_time",              label: "Active time",              offset: 26, type: "uint16", unit: "s" },
   { key: "last_attach_duration_ms",  label: "Last attach duration",     offset: 28, type: "uint32", unit: "ms" },
   { key: "last_tx_duration_ms",      label: "Last TX duration",         offset: 32, type: "uint32", unit: "ms" },
+];
+
+// The 40-byte context of the 86-byte revision: the 82-byte one plus two counters.
+const V1_REV_86_CONTEXT_FIELDS: ContextFieldDef[] = [
+  ...V1_REV_82_CONTEXT_FIELDS,
   { key: "reporting_lost_counter",   label: "Reporting lost counter",   offset: 36, type: "uint16", unit: "" },
   { key: "tx_failed",                label: "Tx failed",                offset: 38, type: "uint16", unit: "" },
 ];
 
 // Kept for callers written against the single-format decoder. New code should
-// use sampleFieldsFor(version), since the channel set is version-specific.
+// use layoutOf(decoded) / sampleFieldsFor(version), since the channel set is
+// format-specific.
 export const SAMPLE_FIELDS = V0_SAMPLE_FIELDS;
 
 // ---------------------------------------------------------------------------
@@ -172,6 +213,10 @@ export const SAMPLE_FIELDS = V0_SAMPLE_FIELDS;
 // ---------------------------------------------------------------------------
 
 export interface PayloadLayout {
+  /** Stable identifier of this exact wire format, e.g. "v1" or "v1-86". */
+  revision: string;
+  /** Human-readable name for the UI. */
+  label: string;
   version: number;
   headerSize: number;
   sampleSize: number;
@@ -180,69 +225,161 @@ export interface PayloadLayout {
   contextFields: ContextFieldDef[];
   /** V1 carries a device UID in the header; V0 does not. */
   hasDeviceUid: boolean;
-  /** Set when the format allows exactly one sample count (V1: always 1). */
+  /** Set when the format allows exactly one sample count. */
   requiredSampleCount: number | null;
+  /** Whether each sample carries its read time (current V1 revision only). */
+  hasSampleTime: boolean;
 }
 
-export const LAYOUTS: Record<number, PayloadLayout> = {
-  0: {
-    version: 0,
-    headerSize: V0_HEADER_SIZE,
-    sampleSize: V0_SAMPLE_SIZE,
-    contextSize: V0_CONTEXT_SIZE,
-    sampleFields: V0_SAMPLE_FIELDS,
-    contextFields: V0_CONTEXT_FIELDS,
-    hasDeviceUid: false,
-    requiredSampleCount: null,
-  },
-  1: {
-    version: 1,
-    headerSize: V1_HEADER_SIZE,
-    sampleSize: V1_SAMPLE_SIZE,
-    contextSize: V1_CONTEXT_SIZE,
-    sampleFields: V1_SAMPLE_FIELDS,
-    contextFields: V1_CONTEXT_FIELDS,
-    hasDeviceUid: true,
-    // v1 always carries a single sample: the format keeps the field for v2,
-    // which will add the timestamping needed to place several samples in time.
-    requiredSampleCount: 1,
-  },
+export const V0_CONTEXT_FIELDS: ContextFieldDef[] = [
+  { key: "error_mask",        label: "Error mask",        offset: 0, type: "uint32", unit: "" },
+  { key: "reporting_counter", label: "Reporting counter", offset: 4, type: "uint32", unit: "" },
+];
+
+export const V0_LAYOUT: PayloadLayout = {
+  revision: "v0",
+  label: "V0",
+  version: 0,
+  headerSize: V0_HEADER_SIZE,
+  sampleSize: V0_SAMPLE_SIZE,
+  contextSize: V0_CONTEXT_SIZE,
+  sampleFields: V0_SAMPLE_FIELDS,
+  contextFields: V0_CONTEXT_FIELDS,
+  hasDeviceUid: false,
+  requiredSampleCount: null,
+  hasSampleTime: false,
 };
 
-// The layout for a version, or undefined when the version is unknown.
+export const V1_LAYOUT: PayloadLayout = {
+  revision: "v1",
+  label: "V1",
+  version: 1,
+  headerSize: V1_HEADER_SIZE,
+  sampleSize: V1_SAMPLE_SIZE,
+  contextSize: V1_CONTEXT_SIZE,
+  sampleFields: V1_SAMPLE_FIELDS,
+  contextFields: V1_CONTEXT_FIELDS,
+  hasDeviceUid: true,
+  // The document no longer requires rejecting sample_count != 1: it is 1 in
+  // practice, and the per-sample time now makes several samples placeable.
+  requiredSampleCount: null,
+  hasSampleTime: true,
+};
+
+export const V1_REV_86_LAYOUT: PayloadLayout = {
+  revision: "v1-86",
+  label: "V1 (86-byte revision)",
+  version: 1,
+  headerSize: V1_HEADER_SIZE,
+  sampleSize: 32,
+  contextSize: 40,
+  sampleFields: V1_LEGACY_SAMPLE_FIELDS,
+  contextFields: V1_REV_86_CONTEXT_FIELDS,
+  hasDeviceUid: true,
+  requiredSampleCount: 1,
+  hasSampleTime: false,
+};
+
+export const V1_REV_82_LAYOUT: PayloadLayout = {
+  revision: "v1-82",
+  label: "V1 (82-byte revision)",
+  version: 1,
+  headerSize: V1_HEADER_SIZE,
+  sampleSize: 32,
+  contextSize: 36,
+  sampleFields: V1_LEGACY_SAMPLE_FIELDS,
+  contextFields: V1_REV_82_CONTEXT_FIELDS,
+  hasDeviceUid: true,
+  requiredSampleCount: 1,
+  hasSampleTime: false,
+};
+
+// Every layout of a version, current revision first.
+const LAYOUTS_BY_VERSION: Record<number, PayloadLayout[]> = {
+  0: [V0_LAYOUT],
+  1: [V1_LAYOUT, V1_REV_86_LAYOUT, V1_REV_82_LAYOUT],
+};
+
+const LAYOUTS_BY_REVISION: Record<string, PayloadLayout> = Object.fromEntries(
+  Object.values(LAYOUTS_BY_VERSION)
+    .flat()
+    .map((layout) => [layout.revision, layout]),
+);
+
+// The current layout of each version, keyed by version number.
+export const LAYOUTS: Record<number, PayloadLayout> = {
+  0: V0_LAYOUT,
+  1: V1_LAYOUT,
+};
+
+// The current layout of a version, or undefined when the version is unknown.
 export function layoutFor(version: number): PayloadLayout | undefined {
   return LAYOUTS[version];
 }
 
-// Sample channels for a version, falling back to V0 for unknown versions so a
-// caller rendering a legacy stored row never crashes.
+// The exact layout a decoded payload was read with.
+export function layoutOf(decoded: Pick<DecodedPayload, "layout_revision" | "payload_version">): PayloadLayout {
+  return (
+    LAYOUTS_BY_REVISION[decoded.layout_revision] ??
+    layoutFor(decoded.payload_version) ??
+    V0_LAYOUT
+  );
+}
+
+// Sample channels of a version's current layout, falling back to V0 for unknown
+// versions so a caller rendering a legacy stored row never crashes.
 export function sampleFieldsFor(version: number): SampleFieldDef[] {
-  return (layoutFor(version) ?? LAYOUTS[0]).sampleFields;
+  return (layoutFor(version) ?? V0_LAYOUT).sampleFields;
 }
 
 export function contextFieldsFor(version: number): ContextFieldDef[] {
-  return (layoutFor(version) ?? LAYOUTS[0]).contextFields;
+  return (layoutFor(version) ?? V0_LAYOUT).contextFields;
 }
 
-// Total payload length for a given sample count. `version` defaults to 0 for
-// callers written before the format became version-dependent.
-export function expectedLength(sampleCount: number, version = 0): number {
-  const layout = layoutFor(version) ?? LAYOUTS[0];
+function lengthOf(layout: PayloadLayout, sampleCount: number): number {
   return layout.headerSize + layout.sampleSize * sampleCount + layout.contextSize;
+}
+
+// Total payload length for a given sample count, in the current layout of the
+// version. `version` defaults to 0 for callers written before the format
+// became version-dependent.
+export function expectedLength(sampleCount: number, version = 0): number {
+  return lengthOf(layoutFor(version) ?? V0_LAYOUT, sampleCount);
+}
+
+// Pick the layout whose geometry matches this payload: its body tiles the
+// sample size exactly and the header's sample count agrees with the length.
+// Falls back to the version's current layout, so a malformed payload is
+// reported against the format devices are expected to send today.
+function resolveLayout(
+  version: number,
+  byteLength: number,
+  headerSampleCount: (layout: PayloadLayout) => number | null,
+): PayloadLayout | undefined {
+  const candidates = LAYOUTS_BY_VERSION[version];
+  if (!candidates) return undefined;
+  if (candidates.length === 1) return candidates[0];
+
+  for (const layout of candidates) {
+    const body = byteLength - layout.headerSize - layout.contextSize;
+    if (body < 0 || body % layout.sampleSize !== 0) continue;
+    if (body / layout.sampleSize === headerSampleCount(layout)) return layout;
+  }
+  return candidates[0];
 }
 
 // ---------------------------------------------------------------------------
 // Decoded shapes
 // ---------------------------------------------------------------------------
 
-// A decoded sample. The channel set depends on the payload version (see
-// V0_SAMPLE_FIELDS / V1_SAMPLE_FIELDS), so the value is keyed by channel name;
-// iterate sampleFieldsFor(version) to walk the channels a payload actually has.
+// A decoded sample. The channel set depends on the format, so the value is
+// keyed by channel name; iterate layoutOf(decoded).sampleFields to walk the
+// channels a payload actually has.
 export type DecodedSample = Record<string, number>;
 
 // The decoded batch context. error_mask and reporting_counter are always
 // present — in V1 the reporting counter lives in the header and is mirrored
-// here so both formats expose it in the same place.
+// here so every format exposes it in the same place.
 export type DecodedContext = {
   error_mask: number;
   reporting_counter: number;
@@ -250,11 +387,19 @@ export type DecodedContext = {
 
 export interface DecodedPayload {
   payload_version: number;
+  /** The exact wire format the payload was read with ("v0", "v1", "v1-86", "v1-82"). */
+  layout_revision: string;
   /** Colon-separated uppercase UID ("00:12:4B:…"), null for V0 payloads. */
   device_uid: string | null;
   sample_count: number;
   samples: DecodedSample[];
   context: DecodedContext;
+  /**
+   * What each sample's `time` means, from status flags bit 5: true = UTC epoch
+   * seconds, false = seconds since boot (no absolute time; use the reception
+   * time). Null for formats whose samples carry no time.
+   */
+  sample_time_utc: boolean | null;
   // Convenience mirrors of the context fields plus the resolved catalog.
   error_mask: number;
   error_mask_hex: string;
@@ -279,7 +424,10 @@ export interface PayloadAnalysis {
     expectedLength: number;
     sampleCount: number;
     version: number;
-    // Section sizes for this payload's version, so the UI can label the
+    /** Layout revision and its label, e.g. "v1-86" / "V1 (86-byte revision)". */
+    revision: string;
+    revisionLabel: string;
+    // Section sizes for this payload's format, so the UI can label the
     // binary/hex legend without re-deriving the layout.
     headerSize: number;
     sampleSize: number;
@@ -362,11 +510,25 @@ export function hexToBytes(hex: string): Uint8Array {
 }
 
 // Format the 8 raw UID bytes the way the protocol document prints them:
-// uppercase hex, colon separated, in wire order (never byte-swapped).
+// uppercase hex, colon separated, in canonical wire order (byte 0 is the first
+// byte of the OUI; never byte-swapped).
 export function formatDeviceUid(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, "0").toUpperCase())
     .join(":");
+}
+
+/**
+ * Normalise a user-typed device UID to the stored "00:12:4B:…" form.
+ *
+ * Accepts any separator (or none) and any case, so "00124b001a2b3c4d",
+ * "00-12-4B-00-1A-2B-3C-4D" and the canonical form all match the same device.
+ * Returns null when the input is not exactly 8 bytes of hex.
+ */
+export function normalizeDeviceUid(input: string): string | null {
+  const hex = input.replace(/[^0-9a-fA-F]/g, "");
+  if (hex.length !== 16) return null;
+  return (hex.match(/../g) as string[]).map((b) => b.toUpperCase()).join(":");
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +574,9 @@ function readContext(
   return context;
 }
 
+// Status flags bit 5: sample times are UTC (set) or seconds since boot (clear).
+export const STATUS_FLAG_TIME_UTC = 0x20;
+
 // Decode a raw payload into its structured form. Throws PayloadDecodeError on
 // any validation failure (empty, invalid length, unsupported version, sample
 // count mismatch, malformed body).
@@ -425,9 +590,12 @@ export function decodePayload(input: PayloadInput): DecodedPayload {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
   // The version byte sits at offset 0 in every format, so it is what selects
-  // the layout used to read the rest.
+  // the family of layouts; the length then selects the revision within it.
   const payloadVersion = view.getUint8(0);
-  const layout = layoutFor(payloadVersion);
+  const layout = resolveLayout(payloadVersion, bytes.length, (candidate) => {
+    const at = candidate.hasDeviceUid ? 9 : 1;
+    return bytes.length > at ? view.getUint8(at) : null;
+  });
 
   if (!layout) {
     throw new PayloadDecodeError(
@@ -474,22 +642,22 @@ export function decodePayload(input: PayloadInput): DecodedPayload {
   if (derivedCount !== sampleCount) {
     throw new PayloadDecodeError(
       "SAMPLE_COUNT_MISMATCH",
-      `Header declares ${sampleCount} sample(s) but the payload length implies ${derivedCount}. Expected ${expectedLength(
+      `Header declares ${sampleCount} sample(s) but the payload length implies ${derivedCount}. Expected ${lengthOf(
+        layout,
         sampleCount,
-        payloadVersion,
       )} bytes, got ${bytes.length}.`,
     );
   }
 
-  // V1 receivers must reject any payload that does not carry exactly one
-  // sample, even when the header and the length agree with each other.
+  // The earlier V1 revisions required exactly one sample, even when the header
+  // and the length agreed with each other.
   if (
     layout.requiredSampleCount !== null &&
     sampleCount !== layout.requiredSampleCount
   ) {
     throw new PayloadDecodeError(
       "SAMPLE_COUNT_MISMATCH",
-      `Version ${payloadVersion} carries exactly ${layout.requiredSampleCount} sample, got ${sampleCount}.`,
+      `${layout.label} carries exactly ${layout.requiredSampleCount} sample, got ${sampleCount}.`,
     );
   }
 
@@ -511,7 +679,7 @@ export function decodePayload(input: PayloadInput): DecodedPayload {
 
   const errorMask = rawContext.error_mask ?? 0;
   // V1 keeps the reporting counter in the header; mirror it into the context so
-  // both formats expose it in the same place (the stored column, the charts and
+  // every format exposes it in the same place (the stored column, the charts and
   // the CSV all read it from there).
   const reportingCounter =
     headerReportingCounter ?? rawContext.reporting_counter ?? 0;
@@ -524,15 +692,36 @@ export function decodePayload(input: PayloadInput): DecodedPayload {
 
   return {
     payload_version: payloadVersion,
+    layout_revision: layout.revision,
     device_uid: deviceUid,
     sample_count: sampleCount,
     samples,
     context,
+    sample_time_utc: layout.hasSampleTime
+      ? ((rawContext.status_flags ?? 0) & STATUS_FLAG_TIME_UTC) !== 0
+      : null,
     error_mask: errorMask,
     error_mask_hex: formatErrorMask(errorMask),
     reporting_counter: reportingCounter,
     errors: resolveErrorMask(errorMask),
   };
+}
+
+/**
+ * The absolute time of a sample, when the payload carries one.
+ *
+ * Returns the UTC instant when status flags bit 5 says the sample time is UTC.
+ * Returns null when the time is seconds since boot (the document says to use
+ * the reception time instead) or when the format has no sample time at all.
+ */
+export function sampleInstant(
+  decoded: Pick<DecodedPayload, "sample_time_utc">,
+  sample: DecodedSample,
+): Date | null {
+  if (decoded.sample_time_utc !== true) return null;
+  const seconds = sample.time;
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return null;
+  return new Date(seconds * 1000);
 }
 
 // Annotate every byte with the section it belongs to, for the comparison view.
@@ -570,14 +759,16 @@ function annotateBytes(
 export function analyzePayload(input: PayloadInput): PayloadAnalysis {
   const bytes = toUint8Array(input);
   const decoded = decodePayload(bytes);
-  const layout = layoutFor(decoded.payload_version) ?? LAYOUTS[0];
+  const layout = layoutOf(decoded);
 
   return {
     meta: {
       byteLength: bytes.length,
-      expectedLength: expectedLength(decoded.sample_count, decoded.payload_version),
+      expectedLength: lengthOf(layout, decoded.sample_count),
       sampleCount: decoded.sample_count,
       version: decoded.payload_version,
+      revision: layout.revision,
+      revisionLabel: layout.label,
       headerSize: layout.headerSize,
       sampleSize: layout.sampleSize,
       contextSize: layout.contextSize,
