@@ -1,11 +1,25 @@
 import { formatCreatedAt } from "@/lib/utils";
 import { describeCommError, formatErrorMask } from "@/lib/payload-errors";
+import { STATUS_FLAG_TIME_UTC } from "@/lib/payload-decoder";
 import type { PayloadRecord } from "@/lib/types";
 
 // Render a nullable numeric column: an absent reading is an empty cell, never a
 // zero, so a spreadsheet never averages "no data" in with real measurements.
 function numeric(value: number | null | undefined): string {
   return value === null || value === undefined ? "" : String(value);
+}
+
+// The first sample's read time, in the current V1 revision. Status flags bit 5
+// decides what it is: a UTC epoch (written as ISO 8601, so a spreadsheet sorts
+// it) or seconds since boot, which has no absolute meaning and is written as
+// such. Empty for formats whose samples carry no time.
+function sampleTimeCell(r: PayloadRecord): string {
+  const seconds = r.samples?.[0]?.time;
+  if (typeof seconds !== "number") return "";
+  if (((r.context?.status_flags ?? 0) & STATUS_FLAG_TIME_UTC) !== 0) {
+    return new Date(seconds * 1000).toISOString();
+  }
+  return `uptime ${seconds} s`;
 }
 
 // A single exportable CSV column: a stable key, the header shown in the file
@@ -24,6 +38,7 @@ export interface CsvColumn {
 export const CSV_COLUMNS: CsvColumn[] = [
   { key: "created_at", label: "Received", value: (r) => formatCreatedAt(r.created_at) },
   { key: "device_uid", label: "Device UID", value: (r) => r.device_uid ?? "" },
+  { key: "sample_time", label: "Sample time", value: sampleTimeCell },
   { key: "payload_version", label: "Version", value: (r) => String(r.payload_version) },
   { key: "sample_count", label: "Samples", value: (r) => String(r.sample_count) },
   { key: "error_mask", label: "Error mask", value: (r) => formatErrorMask(r.error_mask) },

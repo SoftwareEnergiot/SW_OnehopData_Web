@@ -1,4 +1,9 @@
 import { createClient } from "@/lib/supabase/server";
+import {
+  applyDeviceUidFilter,
+  NO_DEVICE_UID,
+  parseDeviceUidFilter,
+} from "@/lib/payload-filters";
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -44,7 +49,10 @@ const COLUMN_TIERS = [
  * then retried with the base columns so the reception charts keep working and
  * only the battery / coverage charts go missing.
  *
- * Query: `from` / `to` (optional, inclusive bounds on `created_at`).
+ * Query: `from` / `to` (optional, inclusive bounds on `created_at`), and
+ * `device_uid` (optional; same rules as GET /api/payloads). Charting one device
+ * at a time matters here: battery and coverage lines from several devices
+ * interleaved into one series would be meaningless.
  * Response:
  * `{ success, points: [{ created_at, byte_length, reporting_counter, battery_soc?, battery_voltage?, rsrp?, snr? }], total, truncated }`
  * ordered oldest first. `truncated` is true when the range holds more than
@@ -55,6 +63,18 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const from = searchParams.get("from");
     const to = searchParams.get("to");
+    const deviceFilter = parseDeviceUidFilter(searchParams.get("device_uid"));
+
+    if (deviceFilter.kind === "invalid") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Invalid device_uid",
+          details: `"${deviceFilter.raw}" is not 8 bytes of hex (e.g. 00:12:4B:00:1A:2B:3C:4D), nor "${NO_DEVICE_UID}".`,
+        },
+        { status: 400 },
+      );
+    }
 
     const fromDate = from ? new Date(from) : null;
     const hasFrom = fromDate && !Number.isNaN(fromDate.getTime());
@@ -92,7 +112,7 @@ export async function GET(request: NextRequest) {
         if (hasFrom) query = query.gte("created_at", fromDate.toISOString());
         if (hasTo) query = query.lte("created_at", toDate.toISOString());
 
-        return query;
+        return applyDeviceUidFilter(query, deviceFilter);
       };
 
       let { data, error } = await runQuery(COLUMN_TIERS[tier]);

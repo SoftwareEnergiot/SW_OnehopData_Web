@@ -12,11 +12,14 @@ import {
 } from "@/components/ui/table";
 import { BinaryHexView } from "@/components/binary-hex-view";
 import {
-  contextFieldsFor,
-  sampleFieldsFor,
+  layoutOf,
+  sampleInstant,
   type ContextFieldDef,
+  type DecodedPayload,
+  type DecodedSample,
   type PayloadAnalysis,
 } from "@/lib/payload-decoder";
+import { formatCreatedAt } from "@/lib/utils";
 import {
   describeCommError,
   describeResetSource,
@@ -56,6 +59,8 @@ function describeContextValue(
   // Needed to tell a flat battery from a failed fuel gauge, which the spec
   // distinguishes by a bit in the error mask of the same report.
   errorMask: number,
+  // Whether this format's status flags carry the sample-time bits.
+  hasSampleTime: boolean,
 ): string | null {
   const batterySocValid = isBatterySocValid(value, errorMask);
   switch (field.key) {
@@ -64,7 +69,15 @@ function describeContextValue(
     case "last_communication_error":
       return describeCommError(value);
     case "status_flags":
-      return resolveStatusFlags(value).join(", ");
+      return resolveStatusFlags(value, hasSampleTime).join(", ");
+    case "config_crc32":
+      // Reserved for remote configuration: always 0 until polling exists.
+      return value === 0
+        ? "not available (always 0 until polling is implemented)"
+        : `0x${(value >>> 0).toString(16).padStart(8, "0")}`;
+    case "last_poll_status":
+      // Reserved for remote configuration; only 0 is defined so far.
+      return value === 0 ? "no poll since boot" : "value not defined yet";
     case "reset_source":
       return describeResetSource(value);
     case "rsrp":
@@ -80,9 +93,14 @@ function describeContextValue(
       return value > 100 ? "above 100 — the firmware does not clamp the gauge" : null;
     case "reporting_lost_counter":
     case "tx_failed":
-    case "boot_count":
       // Counters since boot: the useful reading is the delta between reports.
       return "counter since boot";
+    case "boot_count":
+      // In the current revision this is a lifetime count, never cleared; in the
+      // earlier ones it was reset by a factory reset.
+      return hasSampleTime
+        ? "lifetime boots, never cleared — a low value does not mean a new device"
+        : "boots since last factory reset";
     default:
       return null;
   }
@@ -93,7 +111,7 @@ function SummaryBadges({ analysis }: PayloadAnalysisViewProps) {
   const lengthOk = meta.byteLength === meta.expectedLength;
   return (
     <div className="flex flex-wrap gap-2">
-      <Badge variant="secondary">Version {decoded.payload_version}</Badge>
+      <Badge variant="secondary">{meta.revisionLabel}</Badge>
       {decoded.device_uid && (
         <Badge variant="secondary" className="font-mono">
           {decoded.device_uid}
@@ -169,9 +187,27 @@ function HeaderSection({ analysis }: PayloadAnalysisViewProps) {
   );
 }
 
+// Render a sample's `time`. Status flags bit 5 decides what it is: a UTC epoch
+// (shown on the Madrid clock, like every other timestamp in the dashboard) or
+// seconds since boot, which has no absolute meaning — the document says to use
+// the reception time instead.
+function describeSampleTime(
+  decoded: DecodedPayload,
+  sample: DecodedSample,
+): string {
+  const instant = sampleInstant(decoded, sample);
+  if (instant) return formatCreatedAt(instant.toISOString());
+  const seconds = sample.time ?? 0;
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const uptime = d > 0 ? `${d}d ${h}h ${m}m` : h > 0 ? `${h}h ${m}m` : `${m}m ${seconds % 60}s`;
+  return `uptime ${uptime} — no clock sync yet, use the reception time`;
+}
+
 function SamplesSection({ analysis }: PayloadAnalysisViewProps) {
   const { decoded } = analysis;
-  const fields = sampleFieldsFor(decoded.payload_version);
+  const fields = layoutOf(decoded).sampleFields;
   return (
     <Card>
       <CardHeader className="flex-row items-center gap-2 space-y-0">
@@ -221,9 +257,11 @@ function SamplesSection({ analysis }: PayloadAnalysisViewProps) {
                             : value}
                         </TableCell>
                         <TableCell className="text-right font-mono text-muted-foreground">
-                          {discarded
-                            ? "no reading"
-                            : scaledValue(value, field.factor)}
+                          {field.key === "time"
+                            ? describeSampleTime(decoded, sample)
+                            : discarded
+                              ? "no reading"
+                              : scaledValue(value, field.factor)}
                         </TableCell>
                         <TableCell className="text-muted-foreground">
                           {field.unit || "—"}
@@ -246,7 +284,9 @@ function ValidMaskSection({ analysis }: PayloadAnalysisViewProps) {
   const sample = analysis.decoded.samples[0];
   if (!sample || !("valid_sample_mask" in sample)) return null;
   const mask = sample.valid_sample_mask;
-  const bits = resolveValidSampleMask(mask);
+  // Bit 7 (cable temperature 3) covers no field in V1 and the document says to
+  // ignore it, so it is left out rather than shown as a perpetual failure.
+  const bits = resolveValidSampleMask(mask).filter((bit) => bit.bit !== 7);
 
   return (
     <Card>
@@ -305,7 +345,8 @@ function ValidMaskSection({ analysis }: PayloadAnalysisViewProps) {
 
 function ContextSection({ analysis }: PayloadAnalysisViewProps) {
   const { decoded } = analysis;
-  const fields = contextFieldsFor(decoded.payload_version);
+  const layout = layoutOf(decoded);
+  const fields = layout.contextFields;
   const isV1 = decoded.payload_version >= 1;
 
   return (
@@ -328,7 +369,12 @@ function ContextSection({ analysis }: PayloadAnalysisViewProps) {
           <TableBody>
             {fields.map((field) => {
               const value = decoded.context[field.key] ?? 0;
-              const gloss = describeContextValue(field, value, decoded.error_mask);
+              const gloss = describeContextValue(
+                field,
+                value,
+                decoded.error_mask,
+                layout.hasSampleTime,
+              );
               return (
                 <TableRow key={field.key}>
                   <TableCell>

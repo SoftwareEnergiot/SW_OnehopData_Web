@@ -26,11 +26,15 @@ import {
 import {
   COMM_ERRORS,
   ERR_BIT_BAT_STATUS_UNKNOWN,
+  PAYLOAD_ERRORS,
   RESET_SOURCES,
+  TIME_SOURCES,
   VALID_SAMPLE_BITS,
   describeResetSource,
   isBatterySocValid,
+  resolveErrorMask,
   resolveResetSource,
+  resolveStatusFlags,
 } from "@/lib/payload-errors";
 
 // Bytes each field type occupies, used to prove the tables tile their section
@@ -40,9 +44,9 @@ const WIDTH = { int8: 1, uint8: 1, int16: 2, uint16: 2, uint32: 4 } as const;
 describe("V1 section sizes", () => {
   it("matches the Overview table", () => {
     expect(V1_HEADER_SIZE).toBe(14);
-    expect(V1_SAMPLE_SIZE).toBe(32);
-    expect(V1_CONTEXT_SIZE).toBe(40);
-    expect(expectedLength(1, 1)).toBe(86);
+    expect(V1_SAMPLE_SIZE).toBe(36);
+    expect(V1_CONTEXT_SIZE).toBe(43);
+    expect(expectedLength(1, 1)).toBe(93);
   });
 
   it("leaves V0 untouched", () => {
@@ -52,15 +56,16 @@ describe("V1 section sizes", () => {
     expect(expectedLength(5, 0)).toBe(150);
   });
 
-  it("requires exactly one sample in V1 and any number in V0", () => {
-    expect(layoutFor(1)!.requiredSampleCount).toBe(1);
+  it("no longer requires exactly one sample in the current V1 revision", () => {
+    expect(layoutFor(1)!.requiredSampleCount).toBeNull();
     expect(layoutFor(0)!.requiredSampleCount).toBeNull();
   });
 });
 
 describe("V1 sample table", () => {
-  // Ids 1-15 of the "Sample" table: [key, type, factor, unit].
+  // Ids 1-16 of the "Sample" table: [key, type, factor, unit].
   const SPEC = [
+    ["time",                 "uint32", 1,  "s"],
     ["thermocouple_1",       "int16",  10, "C"],
     ["thermocouple_2",       "int16",  10, "C"],
     ["current_1_int_temp",   "int16",  10, "C"],
@@ -78,7 +83,7 @@ describe("V1 sample table", () => {
     ["valid_sample_mask",    "uint16", 1,  ""],
   ] as const;
 
-  it("carries all 15 channels, in document order", () => {
+  it("carries all 16 channels, in document order", () => {
     expect(V1_SAMPLE_FIELDS.map((f) => f.key)).toEqual(SPEC.map(([key]) => key));
   });
 
@@ -94,7 +99,7 @@ describe("V1 sample table", () => {
     }
   });
 
-  it("tiles the 32 bytes exactly, with no gap or overlap", () => {
+  it("tiles the 36 bytes exactly, with no gap or overlap", () => {
     let offset = 0;
     for (const field of V1_SAMPLE_FIELDS) {
       expect({ key: field.key, offset: field.offset }).toEqual({
@@ -108,14 +113,14 @@ describe("V1 sample table", () => {
 });
 
 describe("V1 context table", () => {
-  // Ids 1-16 of the "Context" table: [key, type, unit].
+  // Ids 1-17 of the "Context" table: [key, type, unit].
   const SPEC = [
     ["error_mask",               "uint32", ""],
     ["last_communication_error", "uint8",  ""],
     ["battery_soc",              "uint8",  "%"],
     ["battery_voltage",          "uint16", "mV"],
-    ["config_version",           "uint32", ""],
-    ["boot_count",               "uint16", ""],
+    ["config_crc32",             "uint32", ""],
+    ["boot_count",               "uint32", ""],
     ["reset_source",             "uint32", ""],
     ["rsrp",                     "int16",  "dBm"],
     ["snr",                      "int8",   "dB"],
@@ -126,9 +131,10 @@ describe("V1 context table", () => {
     ["last_tx_duration_ms",      "uint32", "ms"],
     ["reporting_lost_counter",   "uint16", ""],
     ["tx_failed",                "uint16", ""],
+    ["last_poll_status",         "uint8",  ""],
   ] as const;
 
-  it("carries all 16 fields, in document order", () => {
+  it("carries all 17 fields, in document order", () => {
     expect(V1_CONTEXT_FIELDS.map((f) => f.key)).toEqual(SPEC.map(([key]) => key));
   });
 
@@ -139,7 +145,7 @@ describe("V1 context table", () => {
     }
   });
 
-  it("tiles the 40 bytes exactly, with no gap or overlap", () => {
+  it("tiles the 43 bytes exactly, with no gap or overlap", () => {
     let offset = 0;
     for (const field of V1_CONTEXT_FIELDS) {
       expect({ key: field.key, offset: field.offset }).toEqual({
@@ -189,6 +195,44 @@ describe("valid sample mask", () => {
   });
 });
 
+describe("error mask", () => {
+  // Every defined bit of the "Error mask" table: 0x00000001 through 0x00400000.
+  // 0x00800000 and above are reserved.
+  it("has a catalog entry for every documented bit, and none reserved", () => {
+    const bits = PAYLOAD_ERRORS.map((e) => e.bit).filter((b) => b !== 0);
+    const documented = Array.from({ length: 23 }, (_, i) => 2 ** i);
+    expect(bits).toEqual(documented);
+  });
+
+  it("names the three bits added with the sample time", () => {
+    expect(resolveErrorMask(0x00100000)[0].name).toBe("ERR_RSN_BOOT_COUNT_NOT_STORED");
+    expect(resolveErrorMask(0x00200000)[0].name).toBe("ERR_RSN_CLOCK_JUMP");
+    expect(resolveErrorMask(0x00400000)[0].name).toBe("ERR_RSN_CLOCK_SYNC_FAILED");
+  });
+
+  it("still reports a reserved bit as unknown instead of dropping it", () => {
+    expect(resolveErrorMask(0x00800000)[0].name).toContain("UNKNOWN");
+  });
+});
+
+describe("status flags", () => {
+  it("decodes the example 0xB7 as the document describes it", () => {
+    // PSM granted, PSM acceptable, attached, NB-IoT, time UTC, source NTP.
+    expect(resolveStatusFlags(0xb7)).toEqual([
+      "PSM granted",
+      "PSM acceptable",
+      "Attached",
+      "NB-IoT",
+      "time UTC",
+      "source NTP",
+    ]);
+  });
+
+  it("maps bits 6-7 to the four time sources", () => {
+    expect(TIME_SOURCES).toEqual({ 0: "no clock sync", 1: "modem clock", 2: "NTP", 3: "manual" });
+  });
+});
+
 describe("last communication error", () => {
   it("matches the documented enum", () => {
     expect(COMM_ERRORS).toEqual({
@@ -199,6 +243,7 @@ describe("last communication error", () => {
       4: "Sleep",
       5: "Clock",
       6: "Unknown",
+      7: "Payload not sent: it contains the modem data-mode terminator (+++)",
     });
   });
 });

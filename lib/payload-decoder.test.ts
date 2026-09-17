@@ -7,6 +7,8 @@ import {
   PayloadDecodeError,
   expectedLength,
   sampleFieldsFor,
+  sampleInstant,
+  normalizeDeviceUid,
 } from "@/lib/payload-decoder";
 
 // The canonical example from "Payload Encode - LoraWAN V0.md".
@@ -144,17 +146,35 @@ describe("validation", () => {
 });
 
 // The canonical example from the V1 protocol page (Confluence, space WSNFD),
-// asserted byte for byte by test/core/test_telemetry_encode_v1.c in the
-// firmware repository.
+// current revision: 93 bytes, with the per-sample time.
 const V1_HEADER_HEX = "0100124B001A2B3C4D012A000000";
 const V1_SAMPLE_HEX =
-  "EB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01";
+  "A068AA6AEB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01";
 const V1_CONTEXT_HEX =
-  "180000000057AC0F030000000C0002000000A1FF0817C0A800000200082000009411000002000500";
+  "180000000057AC0FEFCDAB890C00000002000000A1FF08B7C0A80000020008200000941100000200050000";
 const V1_EXAMPLE_HEX = V1_HEADER_HEX + V1_SAMPLE_HEX + V1_CONTEXT_HEX;
+
+// The same document's example in its two earlier revisions. The version byte
+// never changed, so devices on older firmware send these under version 1, and
+// payloads in these shapes are already stored.
+const V1_LEGACY_SAMPLE_HEX =
+  "EB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01";
+const V1_REV_86_HEX =
+  V1_HEADER_HEX +
+  V1_LEGACY_SAMPLE_HEX +
+  "180000000057AC0F030000000C0002000000A1FF0817C0A800000200082000009411000002000500";
+const V1_REV_82_HEX =
+  V1_HEADER_HEX +
+  V1_LEGACY_SAMPLE_HEX +
+  "180000000057AC0F030000000C0002000000A1FF0817C0A8000002000820000094110000";
 
 describe("decodePayload — V1 protocol example", () => {
   const decoded = decodePayload(hexToBytes(V1_EXAMPLE_HEX));
+
+  it("reads the current 93-byte revision", () => {
+    expect(hexToBytes(V1_EXAMPLE_HEX)).toHaveLength(93);
+    expect(decoded.layout_revision).toBe("v1");
+  });
 
   it("decodes the header, including the device UID", () => {
     expect(decoded.payload_version).toBe(1);
@@ -163,9 +183,10 @@ describe("decodePayload — V1 protocol example", () => {
     expect(decoded.reporting_counter).toBe(42);
   });
 
-  it("decodes sample[0] exactly as documented", () => {
+  it("decodes sample[0] exactly as documented, time included", () => {
     expect(decoded.samples).toHaveLength(1);
     expect(decoded.samples[0]).toEqual({
+      time: 1789552800, // 2026-09-16 10:00:00 UTC
       thermocouple_1: 235, // 23.5 C
       thermocouple_2: 241, // 24.1 C
       current_1_int_temp: 220, // 22.0 C
@@ -184,25 +205,33 @@ describe("decodePayload — V1 protocol example", () => {
     });
   });
 
-  it("decodes the full 36-byte context", () => {
+  it("reads the sample time as UTC when status flags bit 5 is set", () => {
+    expect(decoded.sample_time_utc).toBe(true);
+    expect(sampleInstant(decoded, decoded.samples[0])?.toISOString()).toBe(
+      "2026-09-16T10:00:00.000Z",
+    );
+  });
+
+  it("decodes the full 43-byte context", () => {
     expect(decoded.context).toEqual({
       error_mask: 0x18,
       last_communication_error: 0,
       battery_soc: 87,
       battery_voltage: 4012,
-      config_version: 3,
-      boot_count: 12,
+      config_crc32: 0x89abcdef,
+      boot_count: 12, // uint32 in this revision
       reset_source: 0x02,
       rsrp: -95, // int16, negative
       snr: 8, // int8
-      status_flags: 0x17,
+      status_flags: 0xb7, // PSM granted + acceptable, attached, NB-IoT, UTC, NTP
       tau: 43200,
       active_time: 2,
       last_attach_duration_ms: 8200,
       last_tx_duration_ms: 4500,
       reporting_lost_counter: 2,
       tx_failed: 5,
-      // Mirrored from the header so both formats expose it in one place.
+      last_poll_status: 0,
+      // Mirrored from the header so every format exposes it in one place.
       reporting_counter: 42,
     });
   });
@@ -215,23 +244,79 @@ describe("decodePayload — V1 protocol example", () => {
     ]);
   });
 
-  it("annotates the 86 bytes into 14/32/40 sections", () => {
+  it("annotates the 93 bytes into 14/36/43 sections", () => {
     const analysis = analyzePayload(hexToBytes(V1_EXAMPLE_HEX));
-    expect(analysis.meta.byteLength).toBe(86);
+    expect(analysis.meta.byteLength).toBe(93);
     expect(analysis.meta.expectedLength).toBe(expectedLength(1, 1));
+    expect(analysis.meta.revision).toBe("v1");
     expect(analysis.meta.headerSize).toBe(14);
-    expect(analysis.meta.sampleSize).toBe(32);
-    expect(analysis.meta.contextSize).toBe(40);
+    expect(analysis.meta.sampleSize).toBe(36);
+    expect(analysis.meta.contextSize).toBe(43);
     expect(analysis.bytes[13].section).toBe("header");
     expect(analysis.bytes[14].section).toBe("sample");
-    expect(analysis.bytes[45].section).toBe("sample");
-    expect(analysis.bytes[46].section).toBe("context");
-    expect(analysis.bytes[85].section).toBe("context");
+    expect(analysis.bytes[49].section).toBe("sample");
+    expect(analysis.bytes[50].section).toBe("context");
+    expect(analysis.bytes[92].section).toBe("context");
+  });
+});
+
+describe("sample time", () => {
+  it("is seconds since boot when status flags bit 5 is clear", () => {
+    const bytes = hexToBytes(V1_EXAMPLE_HEX);
+    // status_flags sits at context offset 23 = byte 14 + 36 + 23.
+    const at = 14 + 36 + 23;
+    bytes[at] = bytes[at] & ~0x20;
+    const decoded = decodePayload(bytes);
+    expect(decoded.sample_time_utc).toBe(false);
+    // No absolute time: the document says to use the reception time instead.
+    expect(sampleInstant(decoded, decoded.samples[0])).toBeNull();
+  });
+
+  it("does not exist in formats that carry no sample time", () => {
+    expect(decodePayload(hexToBytes(V1_REV_86_HEX)).sample_time_utc).toBeNull();
+    expect(decodePayload(hexToBytes(EXAMPLE_HEX)).sample_time_utc).toBeNull();
+  });
+});
+
+describe("earlier V1 revisions", () => {
+  it("still decodes the 86-byte revision", () => {
+    const decoded = decodePayload(hexToBytes(V1_REV_86_HEX));
+    expect(decoded.layout_revision).toBe("v1-86");
+    expect(decoded.device_uid).toBe("00:12:4B:00:1A:2B:3C:4D");
+    expect(decoded.samples[0].thermocouple_1).toBe(235);
+    expect(decoded.samples[0].time).toBeUndefined();
+    expect(decoded.context.config_version).toBe(3);
+    expect(decoded.context.boot_count).toBe(12);
+    expect(decoded.context.reset_source).toBe(0x02);
+    expect(decoded.context.reporting_lost_counter).toBe(2);
+    expect(decoded.context.tx_failed).toBe(5);
+  });
+
+  it("still decodes the original 82-byte revision", () => {
+    const decoded = decodePayload(hexToBytes(V1_REV_82_HEX));
+    expect(decoded.layout_revision).toBe("v1-82");
+    expect(decoded.samples[0].valid_sample_mask).toBe(0x017f);
+    expect(decoded.context.last_tx_duration_ms).toBe(4500);
+    expect(decoded.context.reporting_lost_counter).toBeUndefined();
+  });
+
+  it("keeps requiring a single sample in the earlier revisions", () => {
+    const twoSamples =
+      "0100124B001A2B3C4D022A000000" +
+      V1_LEGACY_SAMPLE_HEX +
+      V1_LEGACY_SAMPLE_HEX +
+      "180000000057AC0F030000000C0002000000A1FF0817C0A800000200082000009411000002000500";
+    try {
+      decodePayload(hexToBytes(twoSamples));
+      expect.unreachable();
+    } catch (e) {
+      expect((e as PayloadDecodeError).code).toBe("SAMPLE_COUNT_MISMATCH");
+    }
   });
 });
 
 describe("V1 validation", () => {
-  it("rejects a V1 payload that is not 86 bytes", () => {
+  it("rejects a V1 payload matching no revision", () => {
     const bytes = hexToBytes(V1_EXAMPLE_HEX + "ff");
     try {
       decodePayload(bytes);
@@ -241,22 +326,16 @@ describe("V1 validation", () => {
     }
   });
 
-  it("rejects a V1 payload declaring more than one sample", () => {
-    // Header says 2 samples and the body carries 2, so the geometry is
-    // self-consistent — the spec still requires exactly one.
+  it("accepts several samples in the current revision", () => {
+    // The document no longer requires rejecting sample_count != 1.
     const twoSamples =
       "0100124B001A2B3C4D022A000000" +
       V1_SAMPLE_HEX +
       V1_SAMPLE_HEX +
       V1_CONTEXT_HEX;
-    const bytes = hexToBytes(twoSamples);
-    expect(bytes.length).toBe(14 + 64 + 40);
-    try {
-      decodePayload(bytes);
-      expect.unreachable();
-    } catch (e) {
-      expect((e as PayloadDecodeError).code).toBe("SAMPLE_COUNT_MISMATCH");
-    }
+    const decoded = decodePayload(hexToBytes(twoSamples));
+    expect(decoded.layout_revision).toBe("v1");
+    expect(decoded.samples).toHaveLength(2);
   });
 
   it("still rejects an unknown version", () => {
@@ -280,14 +359,30 @@ describe("version dispatch", () => {
     expect(sampleFieldsFor(0).map((f) => f.key)).toContain("temp1_x10");
     expect(sampleFieldsFor(1).map((f) => f.key)).toContain("thermocouple_1");
     expect(sampleFieldsFor(0)).toHaveLength(13);
-    expect(sampleFieldsFor(1)).toHaveLength(15);
+    expect(sampleFieldsFor(1)).toHaveLength(16);
   });
 
   it("sizes each version correctly", () => {
     expect(expectedLength(5, 0)).toBe(150);
-    expect(expectedLength(1, 1)).toBe(86);
+    expect(expectedLength(1, 1)).toBe(93);
     // Callers written before the format became version-dependent still get V0.
     expect(expectedLength(5)).toBe(150);
+  });
+});
+
+describe("normalizeDeviceUid", () => {
+  it("accepts any separator and case", () => {
+    const canonical = "00:12:4B:00:1A:2B:3C:4D";
+    expect(normalizeDeviceUid(canonical)).toBe(canonical);
+    expect(normalizeDeviceUid("00124b001a2b3c4d")).toBe(canonical);
+    expect(normalizeDeviceUid("00-12-4B-00-1A-2B-3C-4D")).toBe(canonical);
+    expect(normalizeDeviceUid(" 00 12 4b 00 1a 2b 3c 4d ")).toBe(canonical);
+  });
+
+  it("rejects anything that is not exactly 8 bytes", () => {
+    expect(normalizeDeviceUid("00:12:4B")).toBeNull();
+    expect(normalizeDeviceUid("00124b001a2b3c4d00")).toBeNull();
+    expect(normalizeDeviceUid("")).toBeNull();
   });
 });
 

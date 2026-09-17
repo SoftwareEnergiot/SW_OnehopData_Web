@@ -1,5 +1,10 @@
 import { createClient } from "@/lib/supabase/server";
 import { analyzePayload, PayloadDecodeError } from "@/lib/payload-decoder";
+import {
+  applyDeviceUidFilter,
+  NO_DEVICE_UID,
+  parseDeviceUidFilter,
+} from "@/lib/payload-filters";
 import { NextRequest, NextResponse } from "next/server";
 
 // Raw binary bodies require the Node.js runtime (not the Edge runtime) so the
@@ -94,8 +99,9 @@ export async function POST(request: NextRequest) {
  * GET /api/payloads
  *
  * Lists stored payloads, most recent first. Supports `limit`, `offset`, an
- * optional `error_mask` filter, and an optional received-timestamp range
- * (`from` / `to`) filter on `created_at`.
+ * optional `error_mask` filter, an optional received-timestamp range
+ * (`from` / `to`) filter on `created_at`, and an optional `device_uid` filter
+ * (any separator or case; `none` selects the payloads without a UID).
  */
 export async function GET(request: NextRequest) {
   try {
@@ -105,6 +111,20 @@ export async function GET(request: NextRequest) {
     const errorMask = searchParams.get("error_mask");
     const from = searchParams.get("from");
     const to = searchParams.get("to");
+    const deviceFilter = parseDeviceUidFilter(searchParams.get("device_uid"));
+
+    // A malformed UID is an error, not "no filter": silently returning every
+    // device's payloads would look like a filter that matched.
+    if (deviceFilter.kind === "invalid") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Invalid device_uid",
+          details: `"${deviceFilter.raw}" is not 8 bytes of hex (e.g. 00:12:4B:00:1A:2B:3C:4D), nor "${NO_DEVICE_UID}".`,
+        },
+        { status: 400 },
+      );
+    }
 
     const supabase = await createClient();
 
@@ -117,6 +137,8 @@ export async function GET(request: NextRequest) {
     if (errorMask !== null && errorMask !== "") {
       query = query.eq("error_mask", Number(errorMask));
     }
+
+    query = applyDeviceUidFilter(query, deviceFilter);
 
     // Received-timestamp range filter. Accepts any value Date can parse (e.g.
     // an ISO 8601 string); invalid values are ignored rather than erroring.

@@ -46,7 +46,12 @@ INSERT INTO payload_error_codes (code, bit_value, name, description) VALUES
   ('0x00010000', 65536,  'ERR_RSN_BAT_UNDER_25',           'Battery capacity under 25%'),
   ('0x00020000', 131072, 'ERR_RSN_BAT_DISABLED',           'Battery disabled as a precautionary measure'),
   ('0x00040000', 262144, 'ERR_RSN_BAT_STATUS_UNKNOWN',     'Can not determine the status of the battery.'),
-  ('0x00080000', 524288, 'ERR_RSN_SCAP_UNBALANCED',        'Supercapacitors disconnected. Unbalanced detected.')
+  ('0x00080000', 524288, 'ERR_RSN_SCAP_UNBALANCED',        'Supercapacitors disconnected. Unbalanced detected.'),
+  -- Added by the V1 revision that introduced the sample time. Re-run this
+  -- script to add them to an existing database; ON CONFLICT keeps it safe.
+  ('0x00100000', 1048576, 'ERR_RSN_BOOT_COUNT_NOT_STORED', 'This boot''s boot count could not be persisted and may repeat on the next boot.'),
+  ('0x00200000', 2097152, 'ERR_RSN_CLOCK_JUMP',            'A clock sync moved the clock by more than 120 s; sample times around it may be off by that much.'),
+  ('0x00400000', 4194304, 'ERR_RSN_CLOCK_SYNC_FAILED',     'No valid clock in a cycle: modem clock invalid and NTP failed.')
 ON CONFLICT (code) DO UPDATE
   SET bit_value   = EXCLUDED.bit_value,
       name        = EXCLUDED.name,
