@@ -1,35 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { describe, expect, it } from "vitest";
 
 import {
   environmentForDeviceUid,
-  reeReferenceDeviceUid,
   resolveEnvironment,
 } from "@/lib/payload-repository";
-
-/**
- * A Supabase stand-in that records the table it was asked for and answers one
- * canned result. Enough for the two reads this module makes, and it proves
- * which table each call actually named.
- */
-function fakeClient(
-  result: { data?: unknown[]; error?: { message: string } } = { data: [] },
-) {
-  const tables: string[] = [];
-  const client = {
-    tables,
-    from(table: string) {
-      tables.push(table);
-      const builder = {
-        select: () => builder,
-        order: () => builder,
-        limit: () => Promise.resolve({ data: result.data ?? null, error: result.error ?? null }),
-      };
-      return builder;
-    },
-  };
-  return client as unknown as SupabaseClient & { tables: string[] };
-}
+import { REE_SCHEMA } from "@/lib/payload-schemas";
 
 describe("resolveEnvironment", () => {
   it("resolves each environment to its own table and schema", () => {
@@ -62,76 +37,37 @@ describe("resolveEnvironment", () => {
   });
 });
 
-describe("reeReferenceDeviceUid", () => {
-  it("reads the reference UID from the REE table, and nowhere else", async () => {
-    const client = fakeClient({ data: [{ device_uid: "00124B0038A83D90" }] });
-    await expect(reeReferenceDeviceUid(client)).resolves.toBe("00124B0038A83D90");
-    expect(client.tables).toEqual(["payloads_REE"]);
-  });
-
-  it("normalises a stored UID written with separators", async () => {
-    const client = fakeClient({ data: [{ device_uid: "00:12:4b:00:38:a8:3d:90" }] });
-    await expect(reeReferenceDeviceUid(client)).resolves.toBe("00124B0038A83D90");
-  });
-
-  it("has no reference when the table is empty", async () => {
-    await expect(reeReferenceDeviceUid(fakeClient({ data: [] }))).resolves.toBeNull();
-  });
-
-  it("has no reference when the table cannot be read", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const client = fakeClient({ error: { message: "permission denied" } });
-    await expect(reeReferenceDeviceUid(client)).resolves.toBeNull();
-    warn.mockRestore();
-  });
-});
-
 describe("environmentForDeviceUid", () => {
-  const REFERENCE = [{ device_uid: "00124B0038A83D90" }];
-
-  it("routes a payload from the REE device to REE", async () => {
-    await expect(
-      environmentForDeviceUid(fakeClient({ data: REFERENCE }), "00:12:4B:00:38:A8:3D:90"),
-    ).resolves.toBe("REE");
+  it("routes a payload from the REE device to REE", () => {
+    expect(environmentForDeviceUid("00:12:4B:00:38:A8:3D:90")).toBe("REE");
   });
 
-  it("matches regardless of separators or case", async () => {
+  it("matches regardless of separators or case", () => {
     for (const uid of [
       "00124b0038a83d90",
       "00-12-4B-00-38-A8-3D-90",
       "00124B0038A83D90",
     ]) {
-      await expect(
-        environmentForDeviceUid(fakeClient({ data: REFERENCE }), uid),
-      ).resolves.toBe("REE");
+      expect(environmentForDeviceUid(uid), uid).toBe("REE");
     }
   });
 
-  it("routes any other device to Development", async () => {
-    await expect(
-      environmentForDeviceUid(fakeClient({ data: REFERENCE }), "00:12:4B:00:1A:2B:3C:4D"),
-    ).resolves.toBe("Development");
+  it("routes every UID the REE table accepts to REE", () => {
+    for (const uid of REE_SCHEMA.writeDeviceUids ?? []) {
+      expect(environmentForDeviceUid(uid), uid).toBe("REE");
+    }
   });
 
-  it("routes a payload with no UID to Development without asking the REE table", async () => {
-    const client = fakeClient({ data: REFERENCE });
-    await expect(environmentForDeviceUid(client, null)).resolves.toBe("Development");
-    // A V0 payload cannot match anything, so there is nothing to look up.
-    expect(client.tables).toEqual([]);
+  it("routes any other device to Development", () => {
+    expect(environmentForDeviceUid("00:12:4B:00:1A:2B:3C:4D")).toBe("Development");
   });
 
-  it("routes to Development when the REE table holds no reference row", async () => {
-    await expect(
-      environmentForDeviceUid(fakeClient({ data: [] }), "00:12:4B:00:38:A8:3D:90"),
-    ).resolves.toBe("Development");
+  it("routes a payload with no UID to Development", () => {
+    // A V0 payload cannot match anything.
+    expect(environmentForDeviceUid(null)).toBe("Development");
   });
 
-  it("keeps ingesting into Development when the REE table cannot be read", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const client = fakeClient({ error: { message: "permission denied" } });
-    await expect(
-      environmentForDeviceUid(client, "00:12:4B:00:38:A8:3D:90"),
-    ).resolves.toBe("Development");
-    warn.mockRestore();
+  it("routes a malformed UID to Development", () => {
+    expect(environmentForDeviceUid("00:12:4B")).toBe("Development");
   });
 });

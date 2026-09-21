@@ -295,14 +295,20 @@ npm run dev      # http://localhost:3000
 ### Which table an incoming payload lands in
 
 A device sends no `environment` parameter, so the endpoint decides from the
-payload itself: the decoded device UID is compared against the UID already
-stored in `payloads_REE` (read from one row of that table, so the device is a
-property of the data and not of this code).
+payload itself: the decoded device UID is compared against the REE schema's
+`writeDeviceUids` in [`lib/payload-schemas.ts`](lib/payload-schemas.ts) — the
+same list the database restricts `payloads_REE` inserts to.
 
-- **UID matches** → the report is stored in `public."payloads_REE"`, one row per
+- **UID listed** → the report is stored in `public."payloads_REE"`, one row per
   sample.
-- **Anything else** — a different device, a V0 payload that carries no UID, or
-  an empty/unreadable REE table → `public.payloads`, exactly as before.
+- **Anything else** — a different device, or a V0 payload that carries no UID →
+  `public.payloads`, exactly as before.
+
+> The list lives in code, not in the table. Reading the reference UID back from
+> `payloads_REE` made routing depend on the table it is meant to fill: while it
+> was empty, nothing matched and every REE report went to `public.payloads`. A
+> new REE device therefore means adding its UID to `writeDeviceUids` **and** to
+> the database restriction.
 
 The dashboard is different: it names `?environment=<name>` explicitly, that
 choice is honoured as given with no UID-based rerouting, and the answer is JSON

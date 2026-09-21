@@ -50,7 +50,7 @@ export const INGEST_DEFAULT_ENVIRONMENT = "Development";
 
 /**
  * The environment whose table the ingestion endpoint routes a payload to when
- * the payload's own device UID matches the device already stored there. Named
+ * the payload's own device UID is one of that schema's `writeDeviceUids`. Named
  * here rather than spelled out at the call site, so the set of environment
  * names still lives in one module.
  */

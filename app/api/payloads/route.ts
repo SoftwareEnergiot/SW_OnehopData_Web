@@ -49,8 +49,8 @@ function requestedEnvironment(request: NextRequest) {
  * environment's table.
  *
  * Devices send no `environment`, and the endpoint then picks the table from the
- * payload itself: the decoded device UID is compared against the UID already
- * stored in `payloads_REE`, and a match stores the payload there. Anything else
+ * payload itself: a decoded device UID listed in the REE schema's
+ * `writeDeviceUids` stores the payload in `payloads_REE`. Anything else
  * — a different device, or a V0 payload that carries no UID at all — is stored
  * in `public.payloads`, which is where every payload has always landed. A
  * storage failure on that path stays best-effort, as it always has: the payload
@@ -92,8 +92,7 @@ export async function POST(request: NextRequest) {
       const named = new URL(request.url).searchParams.get(ENVIRONMENT_PARAM);
       // Named explicitly -> honour it. Unaddressed -> route on the device UID.
       const target =
-        named ??
-        (await environmentForDeviceUid(supabase, analysis.decoded.device_uid));
+        named ?? environmentForDeviceUid(analysis.decoded.device_uid);
       const resolution = resolveEnvironment(target);
 
       if (!resolution.ok) {
