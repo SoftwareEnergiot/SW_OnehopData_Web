@@ -30,6 +30,8 @@ import {
   resolveStatusFlags,
   resolveValidSampleMask,
 } from "@/lib/payload-errors";
+import { decodeErrorMask } from "@/lib/error-catalog";
+import { useErrorCatalog } from "@/components/use-error-catalog";
 import {
   Binary,
   Cpu,
@@ -430,8 +432,23 @@ function ContextSection({ analysis }: PayloadAnalysisViewProps) {
   );
 }
 
+/**
+ * The active flags of a payload's error mask, resolved against
+ * `public.payload_error_codes`.
+ *
+ * The mask is re-decoded here rather than read from the `errors` column stored
+ * with the payload: the lookup table is the authoritative source of the names
+ * and descriptions, and a row stored before a catalog entry was renamed would
+ * otherwise keep showing the old wording forever. Matching is bitwise on
+ * `bit_value` — an entry is active when `(mask & bit_value) !== 0` — so a
+ * combined mask expands to every flag it sets. A mask of 0 is ERR_RSN_NONE
+ * alone, and ERR_RSN_NONE never appears next to a real error.
+ */
 function ErrorSection({ analysis }: PayloadAnalysisViewProps) {
   const { decoded } = analysis;
+  const { codes, source } = useErrorCatalog();
+  const errors = decodeErrorMask(decoded.error_mask, codes);
+
   return (
     <Card>
       <CardHeader className="flex-row items-center gap-2 space-y-0">
@@ -440,7 +457,7 @@ function ErrorSection({ analysis }: PayloadAnalysisViewProps) {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex flex-wrap gap-2">
-          {decoded.errors.map((err) => (
+          {errors.map((err) => (
             <Badge
               key={err.code}
               variant="outline"
@@ -459,7 +476,7 @@ function ErrorSection({ analysis }: PayloadAnalysisViewProps) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {decoded.errors.map((err) => (
+            {errors.map((err) => (
               <TableRow key={err.code}>
                 <TableCell className="font-mono">{err.code}</TableCell>
                 <TableCell>
@@ -473,11 +490,35 @@ function ErrorSection({ analysis }: PayloadAnalysisViewProps) {
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {err.description}
+                  {/* Reserved bits are specified as always 0; one that is set
+                      is malformed data, and saying so beats rendering it as a
+                      fault the device can actually report. */}
+                  {err.reserved && (
+                    <span className="ml-1 text-xs">
+                      This bit is reserved and should always be 0 — treat it as
+                      malformed data.
+                    </span>
+                  )}
                 </TableCell>
               </TableRow>
             ))}
           </TableBody>
         </Table>
+        <p className="text-xs text-muted-foreground">
+          {source === "database" ? (
+            <>
+              Names and descriptions read from{" "}
+              <span className="font-mono">public.payload_error_codes</span>.
+            </>
+          ) : source === "loading" ? (
+            <>Loading the catalog from public.payload_error_codes…</>
+          ) : (
+            <>
+              <span className="font-mono">public.payload_error_codes</span>{" "}
+              could not be read; showing the built-in catalog instead.
+            </>
+          )}
+        </p>
       </CardContent>
     </Card>
   );

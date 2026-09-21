@@ -3,6 +3,7 @@ import { Poppins } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import { ClerkProvider } from '@clerk/nextjs'
 import { Toaster } from 'sonner'
+import { EnvironmentProvider } from '@/components/environment-provider'
 import './globals.css'
 
 const clerkAppearance = {
@@ -64,7 +65,9 @@ export default function RootLayout({
     >
       <html lang="en" className={poppins.variable}>
         <body className="font-sans antialiased bg-background">
-          {children}
+          {/* Holds the environment the session operates in, so every page and
+              every query below agrees on which payload dataset is active. */}
+          <EnvironmentProvider>{children}</EnvironmentProvider>
           <Toaster position="top-right" />
           {process.env.NODE_ENV === 'production' && <Analytics />}
         </body>

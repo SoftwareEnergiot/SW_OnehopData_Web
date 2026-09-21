@@ -230,7 +230,27 @@ scaling factor, unit):
 
 ### No query parameters
 
-`POST /api/payloads` takes **no** query parameters. (The listing endpoint,
+`POST /api/payloads` takes one optional query parameter, `environment`.
+
+**Devices never send it.** Without it the endpoint picks the table from the
+payload: the decoded device UID is compared against the UID already stored in
+`payloads_REE`, and a match stores the report there (one row per sample).
+Anything else — a different device, a V0 payload with no UID, or an
+empty/unreadable REE table — is stored in `public.payloads`, exactly as before,
+and the answer is still a bare `204` with a best-effort write.
+
+**The dashboard does send it.** `?environment=REE` or `?environment=Development`
+is honoured as given, with no UID-based rerouting, and the answer is JSON so the
+outcome is visible:
+
+| Status | Body | Meaning |
+| ------ | ---- | ------- |
+| `201`  | `{ success: true, environment, table, stored }` | Written. `stored` is the row count. |
+| `422`  | `{ success: false, environment, table, error, details, hint? }` | The database rejected the write (e.g. the REE device-UID restriction), or the payload's format cannot be represented in that table. Never retried against another environment. |
+| `404`  | `{ success: false, error: "Unknown environment", details }` | No data source is mapped for that name. |
+| `400` / `415` | `{ success: false, error, details }` | Decode failure. |
+
+Otherwise, `POST /api/payloads` takes **no** query parameters. (The listing endpoint,
 `GET /api/payloads`, accepts `limit`, `offset`, and `error_mask` — see the end of
 this document.)
 
@@ -313,9 +333,10 @@ back. Also public (no auth). Query parameters:
 
 | Param        | Type     | Default | Description                                                            |
 | ------------ | -------- | ------- | ---------------------------------------------------------------------- |
+| `environment`| `string` | `Development` | Which dataset to list: `Development` (`public.payloads`) or `REE` (`public."payloads_REE"`). Omitting it lists `public.payloads`, which is what this endpoint has always returned. A name the application has no data source for is rejected with `404` — never served from another table. |
 | `limit`      | `number` | `50`    | Page size.                                                             |
 | `offset`     | `number` | `0`     | Rows to skip. With `limit`, pages through every payload in the range.  |
-| `error_mask` | `number` | —       | Optional exact-match filter on `error_mask`.                          |
+| `error_mask` | `number` | —       | Optional exact-match filter on `error_mask`. Ignored for `REE`, whose table has no such column. |
 | `from`       | `string` | —       | Optional lower bound on the received timestamp (`created_at`, inclusive). Any `Date`-parseable value, e.g. an ISO 8601 instant. |
 | `to`         | `string` | —       | Optional upper bound on the received timestamp (`created_at`, inclusive). Any `Date`-parseable value, e.g. an ISO 8601 instant. |
 | `device_uid` | `string` | —       | Optional device filter. A UID in any case and with any separator or none (`00:12:4B:00:1A:2B:3C:4D`, `00124b001a2b3c4d`, `00-12-4B-…`), matched exactly after normalising. `none` selects the payloads without a UID (V0). |
@@ -326,9 +347,16 @@ instead: silently ignoring it would return every device's payloads and look like
 a filter that matched. Example:
 `GET /api/payloads?device_uid=00124b001a2b3c4d&from=2026-07-01T00:00:00Z&limit=50`.
 
-Response: `{ success, data: PayloadRecord[], total, limit, offset }` — `total` is
-the full count matching the filter (ignoring `limit`/`offset`), which is what the
-dashboard uses to page through the range.
+Response: `{ success, environment, table, data, total, limit, offset }` —
+`total` is the full count matching the filter (ignoring `limit`/`offset`), which
+is what the dashboard uses to page through the range, and `table` names the
+table the rows actually came from.
+
+The row shape follows the environment: `PayloadRecord` (a whole received frame)
+for `Development`, `ReePayloadRecord` (one decoded sample) for `REE`. The
+`device_uid` filter is normalised to the form each table stores — colon
+separated for `payloads`, continuous uppercase hex for `payloads_REE` — so the
+same typed UID matches in both.
 
 Each row carries `device_uid`, the V1 header UID formatted as uppercase
 colon-separated hex (`"00:12:4B:00:1A:2B:3C:4D"`). It is `null` for V0 payloads,
@@ -347,6 +375,11 @@ revisions carry `config_version` instead of `config_crc32`, and no `time`.
 
 ### `GET /api/payloads/devices` (device list)
 
+Takes the same optional `environment` parameter, and returns the UIDs in the
+form that environment's table stores them, so a value can be handed straight
+back as a `device_uid` filter.
+
+
 Returns `{ success, devices, withoutUid, truncated }`: every device UID that has
 sent payloads, most recently seen first, each as
 `{ device_uid, payloads, last_seen }`. `withoutUid` is true when some payloads
@@ -360,6 +393,10 @@ missing from the list, which `truncated` signals — filtering by its UID direct
 still works. Public, like the other `GET` endpoints.
 
 ### `GET /api/payloads/summary` (chart series)
+
+Takes the same optional `environment` parameter. The columns selected come from
+that environment's schema, and the response names them in `columns`.
+
 
 Returns `{ success, points, total, truncated }` with one point per payload in
 the range, ordered oldest first: `created_at`, `byte_length`,

@@ -23,6 +23,73 @@ shadcn/ui + Supabase**, tested with **Vitest**.
 
 ---
 
+## Environments
+
+After signing in, the user picks the **environment** the session will operate
+in. The environment decides which payload dataset the whole application reads
+and writes — every table, chart, filter, export and write follows it.
+
+| Environment   | `public.environment.production` | Payload table          | One row is |
+| ------------- | ------------------------------- | ---------------------- | ---------- |
+| `REE`         | `true` → shown as *Production*  | `public."payloads_REE"` | one decoded sample |
+| `Development` | `false` → shown as *Development* | `public.payloads`      | one whole received frame |
+
+The list on the selector comes **only** from `public.environment` — the
+frontend carries no copy of it. The mapping from an environment to its table
+lives in one place, `ENVIRONMENT_CONFIG` in [`lib/environments.ts`](lib/environments.ts);
+no component ever compares an environment name itself.
+
+**The flow:**
+
+```
+Sign in  →  /select-environment  →  /  (dashboard)
+```
+
+- `NEXT_PUBLIC_CLERK_SIGN_IN_FORCE_REDIRECT_URL` lands a fresh sign-in on
+  `/select-environment`.
+- The choice is kept in **`sessionStorage`**, so it survives a refresh but
+  belongs to the browsing session rather than to the browser. A shared machine
+  never inherits someone else's production context.
+- On every load the persisted choice is re-validated against
+  `public.environment`. One that the table no longer offers is **cleared**, not
+  swapped for another — and the reader goes back to the selector.
+- `/` is wrapped in `<EnvironmentGuard>`: without a valid environment it
+  redirects to `/select-environment` rather than loading payloads.
+- Switching environments remounts the dashboard, so no value from the previous
+  one can survive the switch.
+- Logging out clears the environment along with the session.
+
+Reach the selector again from the user menu → **Change environment**.
+
+### What each environment can do
+
+The two tables hold genuinely different things, so the dashboard is driven by a
+schema descriptor per dataset ([`lib/payload-schemas.ts`](lib/payload-schemas.ts))
+rather than duplicated: columns, labels, units, groups, chartable series, CSV
+columns and capabilities all come from there, and one set of components renders
+either environment.
+
+| Feature | `Development` | `REE` |
+| ------- | ------------- | ----- |
+| List, paging, time range, device filter, refresh | yes | yes |
+| CSV export | yes | yes, REE columns |
+| Reception-frequency and frame-counter charts | yes | yes |
+| Detail inspector | binary-vs-hex + field-by-field decode of the stored frame | field-by-field from the stored columns, with units and the valid-sample mask |
+| Payload-size chart | yes | no — `payloads_REE` has no `byte_length` |
+| Battery / coverage charts | yes | no — `payloads_REE` has no batch context |
+| Sensor-channel charts (temperature, humidity, luminosity, acceleration, magnetic field) | — (each series already has its own chart) | yes, pick any of the 14 channels |
+| Error-mask decoding | yes | **no source** — see below |
+| Writes from the Playground | yes | yes, one row per sample |
+
+**REE carries no error mask.** `payloads_REE` has no error column, and no other
+table, endpoint or joined structure in this project holds one for it. Nothing
+was invented to fill the gap: the REE inspector says so in place of the error
+card, and the catalog lookup is untouched and still decodes any mask it is
+given. If REE error display is wanted, the device would have to store the
+report's `error_mask` alongside the samples.
+
+---
+
 ## Protocol summary
 
 All multi-byte fields are **little-endian**; `int8` / `int16` fields are **two's
@@ -122,6 +189,7 @@ Supabase SQL editor or the CLI:
 # scripts/003_add_device_uid.sql
 # scripts/004_add_v1_diagnostics_columns.sql
 # scripts/005_add_v1_reporting_loss_columns.sql
+# scripts/006_environment_and_ree_access.sql
 ```
 
 They create the `payloads` table (with indexes on `created_at`,
@@ -148,6 +216,18 @@ Unlike `003`, this script is **not** deployment-order sensitive — the insert
 never names these columns. Without it the app works normally; only the battery
 and coverage charts are missing (the summary endpoint detects the absent columns
 and falls back to the reception series alone).
+
+Script `006` is required for the environment selection feature. It does **not**
+create `environment` or `payloads_REE` — both already exist — it grants the
+`anon` role the access the application needs and adds the same public read /
+insert policies `001` already gives `payloads`. Without it both tables answer
+every read with zero rows and reject every insert with `42501`, so the selector
+shows **"No environments available."** and REE looks permanently empty.
+
+> The REE table restricts writes to one device UID. That constraint is the
+> database's and is **not** duplicated, weakened or worked around here: a
+> rejected insert is shown to the user with the database's own message, and is
+> never retried against `payloads`.
 
 ### Where each V1 field is stored
 
@@ -211,6 +291,25 @@ npm run dev      # http://localhost:3000
   Read the decoded payloads back with `GET /api/payloads` or in the dashboard.
   See [docs/api-payloads-ingest.md](docs/api-payloads-ingest.md) for the full
   endpoint contract.
+
+### Which table an incoming payload lands in
+
+A device sends no `environment` parameter, so the endpoint decides from the
+payload itself: the decoded device UID is compared against the UID already
+stored in `payloads_REE` (read from one row of that table, so the device is a
+property of the data and not of this code).
+
+- **UID matches** → the report is stored in `public."payloads_REE"`, one row per
+  sample.
+- **Anything else** — a different device, a V0 payload that carries no UID, or
+  an empty/unreadable REE table → `public.payloads`, exactly as before.
+
+The dashboard is different: it names `?environment=<name>` explicitly, that
+choice is honoured as given with no UID-based rerouting, and the answer is JSON
+(`201` stored / `422` rejected by the database) so a constraint violation is
+shown rather than swallowed behind a `204`. Naming an environment the
+application has no data source for is a `404` — never another environment's
+table.
 
 ### Example (curl) — V1
 

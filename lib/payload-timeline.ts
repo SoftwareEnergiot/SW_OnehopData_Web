@@ -7,7 +7,11 @@ import { isBatterySocValid } from "@/lib/payload-errors";
 
 export interface SummaryPoint {
   created_at: string;
-  byte_length: number;
+  /**
+   * Total received length. Only the Development dataset stores the raw frame,
+   * so this is absent for environments whose table holds decoded samples.
+   */
+  byte_length?: number | null;
   reporting_counter: number;
   // V1 battery and radio diagnostics, generated from `context` by scripts/004.
   // Null or absent for V0 payloads (which carry no such fields) and for every
@@ -29,7 +33,46 @@ export interface SummaryPoint {
   reporting_lost_counter?: number | null;
   /** Failed send attempts since boot. */
   tx_failed?: number | null;
+  /**
+   * Any further measurement column the active environment's schema declares.
+   * Read by name through the generic series below, so a new chartable column
+   * needs no change here.
+   */
+  [column: string]: number | string | null | undefined;
 }
+
+/**
+ * One generic series to aggregate per bucket, named by the column it reads.
+ *
+ * `validMaskKey` / `validBit` express the protocol's valid-sample rule: when
+ * that bit of that column is clear the sensor was not read and the value is a
+ * transmitted 0, which must be left out of the statistics rather than charted
+ * as a measurement.
+ */
+export interface SeriesSpec {
+  key: string;
+  validMaskKey?: string;
+  validBit?: number;
+}
+
+/** Per-bucket (or whole-domain) statistics for one generic series. */
+export interface SeriesStats {
+  min: number | null;
+  max: number | null;
+  mean: number | null;
+  /** Value of the last payload that carried a reading. */
+  last: number | null;
+  /** Payloads that carried a reading. */
+  count: number;
+}
+
+const EMPTY_SERIES_STATS: SeriesStats = {
+  min: null,
+  max: null,
+  mean: null,
+  last: null,
+  count: 0,
+};
 
 export interface TimelineBucket {
   /** Bucket start, epoch ms (inclusive). */
@@ -62,6 +105,8 @@ export interface TimelineBucket {
   meanRsrp: number | null;
   /** Mean SNR (dB) over the payloads that reported a usable (non-zero) one. */
   meanSnr: number | null;
+  /** Stats for each series named in TimelineOptions.series, keyed by column. */
+  series: Record<string, SeriesStats>;
 }
 
 export interface Timeline {
@@ -110,6 +155,8 @@ export interface Timeline {
    * so only the most recent MAX_BUCKETS are plotted.
    */
   clamped: boolean;
+  /** Domain-wide stats for each series named in TimelineOptions.series. */
+  series: Record<string, SeriesStats>;
 }
 
 interface TimelineOptions {
@@ -118,6 +165,40 @@ interface TimelineOptions {
   to?: number | null;
   /** Width of one bucket, e.g. 3_600_000 for hourly. */
   bucketMs: number;
+  /**
+   * Measurement columns to aggregate alongside the built-in series. Empty (the
+   * default) reproduces the original behaviour exactly.
+   */
+  series?: readonly SeriesSpec[];
+}
+
+/**
+ * A series value on one payload, or null when there is no reading: a missing
+ * or non-numeric column, or one whose valid-sample bit is clear.
+ */
+function seriesValue(point: SummaryPoint, spec: SeriesSpec): number | null {
+  const raw = point[spec.key];
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
+
+  if (spec.validMaskKey !== undefined && spec.validBit !== undefined) {
+    const mask = point[spec.validMaskKey];
+    if (typeof mask === "number" && Number.isFinite(mask)) {
+      if (((mask >>> 0) & (1 << spec.validBit)) === 0) return null;
+    }
+  }
+  return raw;
+}
+
+function seriesStatsOf(values: (number | null)[]): SeriesStats {
+  const present = values.filter((v): v is number => v !== null);
+  if (present.length === 0) return { ...EMPTY_SERIES_STATS };
+  return {
+    min: Math.min(...present),
+    max: Math.max(...present),
+    mean: present.reduce((a, b) => a + b, 0) / present.length,
+    last: present[present.length - 1],
+    count: present.length,
+  };
 }
 
 // Ceiling on how many buckets a range may be cut into, so a narrow bucket over
@@ -188,12 +269,12 @@ function statsOf(values: (number | null)[]): {
  */
 export function buildTimeline(
   points: SummaryPoint[],
-  { from, to, bucketMs }: TimelineOptions,
+  { from, to, bucketMs, series = [] }: TimelineOptions,
 ): Timeline | null {
   const parsed = points
     .map((p) => ({
       t: Date.parse(p.created_at),
-      bytes: p.byte_length,
+      bytes: finiteOrNull(p.byte_length),
       counter: p.reporting_counter,
       // V0 rows have no diagnostics at all; a V1 row can still omit a radio
       // metric by sending 0, which the spec defines as "not available".
@@ -207,6 +288,8 @@ export function buildTimeline(
       snr: availableOrNull(p.snr),
       lost: finiteOrNull(p.reporting_lost_counter),
       txFailed: finiteOrNull(p.tx_failed),
+      // One entry per requested series, in the order they were requested.
+      values: series.map((spec) => seriesValue(p, spec)),
     }))
     .filter((p) => Number.isFinite(p.t))
     .sort((a, b) => a.t - b.t);
@@ -260,14 +343,22 @@ export function buildTimeline(
     maxRsrp: null,
     meanRsrp: null,
     meanSnr: null,
+    series: {},
   }));
 
   const sums = new Array<number>(n).fill(0);
+  // Counted apart from bucket.count: a dataset that stores no byte length still
+  // has payloads in the bucket, it just has no size to average.
+  const byteCounts = new Array<number>(n).fill(0);
   // Per-bucket diagnostic readings, kept aside so each bucket's stats are
   // computed only over the payloads that actually carried them.
   const socByBucket: number[][] = Array.from({ length: n }, () => []);
   const rsrpByBucket: number[][] = Array.from({ length: n }, () => []);
   const snrByBucket: number[][] = Array.from({ length: n }, () => []);
+  // [bucket][series] -> the readings that landed there, in arrival order.
+  const seriesByBucket: (number | null)[][][] = Array.from({ length: n }, () =>
+    series.map(() => []),
+  );
   const inRange: typeof parsed = [];
 
   for (const point of parsed) {
@@ -280,11 +371,14 @@ export function buildTimeline(
     const index = Math.min(n - 1, Math.floor((t - start) / width));
     const bucket = buckets[index];
     bucket.count += 1;
-    sums[index] += bytes;
-    bucket.minBytes =
-      bucket.minBytes === null ? bytes : Math.min(bucket.minBytes, bytes);
-    bucket.maxBytes =
-      bucket.maxBytes === null ? bytes : Math.max(bucket.maxBytes, bytes);
+    if (bytes !== null) {
+      sums[index] += bytes;
+      byteCounts[index] += 1;
+      bucket.minBytes =
+        bucket.minBytes === null ? bytes : Math.min(bucket.minBytes, bytes);
+      bucket.maxBytes =
+        bucket.maxBytes === null ? bytes : Math.max(bucket.maxBytes, bytes);
+    }
     bucket.minCounter =
       bucket.minCounter === null ? counter : Math.min(bucket.minCounter, counter);
     bucket.maxCounter =
@@ -298,10 +392,14 @@ export function buildTimeline(
     }
     if (point.rsrp !== null) rsrpByBucket[index].push(point.rsrp);
     if (point.snr !== null) snrByBucket[index].push(point.snr);
+
+    for (let s = 0; s < series.length; s++) {
+      seriesByBucket[index][s].push(point.values[s]);
+    }
   }
 
   for (let i = 0; i < n; i++) {
-    if (buckets[i].count > 0) buckets[i].meanBytes = sums[i] / buckets[i].count;
+    if (byteCounts[i] > 0) buckets[i].meanBytes = sums[i] / byteCounts[i];
 
     const soc = statsOf(socByBucket[i]);
     buckets[i].minBatterySoc = soc.min;
@@ -314,6 +412,10 @@ export function buildTimeline(
     buckets[i].meanRsrp = rsrp.mean;
 
     buckets[i].meanSnr = statsOf(snrByBucket[i]).mean;
+
+    for (let s = 0; s < series.length; s++) {
+      buckets[i].series[series[s].key] = seriesStatsOf(seriesByBucket[i][s]);
+    }
   }
 
   // A counter that goes backwards between consecutive payloads is a reset —
@@ -323,8 +425,16 @@ export function buildTimeline(
     if (inRange[i].counter < inRange[i - 1].counter) counterResets += 1;
   }
 
-  const bytes = inRange.map((p) => p.bytes);
+  const bytes = inRange
+    .map((p) => p.bytes)
+    .filter((v): v is number => v !== null);
   const counters = inRange.map((p) => p.counter);
+
+  // Domain-wide stats per series, over the payloads that carried a reading.
+  const domainSeries: Record<string, SeriesStats> = {};
+  for (let s = 0; s < series.length; s++) {
+    domainSeries[series[s].key] = seriesStatsOf(inRange.map((p) => p.values[s]));
+  }
 
   // Domain-wide diagnostic stats, over the payloads that reported each metric.
   const socValues = inRange
@@ -366,6 +476,7 @@ export function buildTimeline(
     minSnr: snr.min,
     maxSnr: snr.max,
     clamped,
+    series: domainSeries,
   };
 }
 

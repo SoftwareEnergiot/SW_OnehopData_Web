@@ -48,3 +48,48 @@ export interface PayloadListResponse {
 
 // POST /api/payloads returns no body — the outcome is the HTTP status alone
 // (204 accepted, 4xx decode failure, 500 unexpected error).
+
+// A stored REE sample row, as returned by the API / Supabase. One row is one
+// already-decoded sample — `payloads_REE` holds no raw frame and no batch
+// context, so there is no payload_hex, no byte_length and no error mask here.
+// Every sensor column is nullable; a reading whose `valid_sample_mask` bit is
+// clear was transmitted as 0 and must be discarded (see isReadingValid).
+export interface ReePayloadRecord {
+  id: number;
+  created_at: string;
+  payload_version: number;
+  device_uid: string;
+  sample_count: number;
+  reporting_counter: number;
+  sample_time: number;
+  thermocouple_1: number | null;
+  thermocouple_2: number | null;
+  current_1_internal_temperature: number | null;
+  current_2_internal_temperature: number | null;
+  ambient_temperature: number | null;
+  internal_temperature: number | null;
+  ambient_humidity: number | null;
+  internal_humidity: number | null;
+  luminosity: number | null;
+  acceleration_x: number | null;
+  acceleration_y: number | null;
+  acceleration_z: number | null;
+  magnetic_field_1: number | null;
+  magnetic_field_2: number | null;
+  valid_sample_mask: number | null;
+}
+
+// Either environment's row shape. Schema-driven views read columns by key, so
+// they work against whichever of the two the active environment selects.
+export type PayloadRow = PayloadRecord | ReePayloadRecord;
+
+// Shape returned by GET /api/payloads for any environment.
+export interface PayloadRowsResponse {
+  success: boolean;
+  environment: string;
+  table: string;
+  data: PayloadRow[];
+  total: number;
+  limit: number;
+  offset: number;
+}

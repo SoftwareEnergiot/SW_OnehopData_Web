@@ -22,47 +22,93 @@ function cell(value: number | null, decimals = 0): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(decimals);
 }
 
+/** One measurement column to append, named by the series it reads. */
+export interface TimelineCsvSeries {
+  key: string;
+  label: string;
+}
+
+export interface TimelineCsvOptions {
+  /** Include the byte-size columns. Only datasets that store the raw frame. */
+  includeBytes?: boolean;
+  /** Include the V1 battery / radio columns. */
+  includeDiagnostics?: boolean;
+  /** Measurement series to append, min / mean / max per bucket. */
+  series?: readonly TimelineCsvSeries[];
+  /** Header for the per-bucket row count. */
+  countLabel?: string;
+}
+
 // Build a CSV of the timeline's buckets — the same rows the "Show values" table
-// renders, one line per bucket. Emitted CRLF-terminated for Excel.
-export function buildTimelineCsv(timeline: Timeline): string {
+// renders, one line per bucket. The column set follows the active dataset, so
+// an export never carries a wall of empty columns for something the table does
+// not store. Emitted CRLF-terminated for Excel.
+export function buildTimelineCsv(
+  timeline: Timeline,
+  {
+    includeBytes = true,
+    includeDiagnostics = true,
+    series = [],
+    countLabel = "Payloads",
+  }: TimelineCsvOptions = {},
+): string {
   const header = [
     "Bucket start",
-    "Payloads",
-    "Min bytes",
-    "Mean bytes",
-    "Max bytes",
+    countLabel,
+    ...(includeBytes ? ["Min bytes", "Mean bytes", "Max bytes"] : []),
     "Counter (last)",
     "Min counter",
     "Max counter",
     // V1 diagnostics. Empty for buckets whose payloads carried none.
-    "Battery SoC mean (%)",
-    "Min battery SoC (%)",
-    "Max battery SoC (%)",
-    "Battery voltage (mV)",
-    "RSRP mean (dBm)",
-    "Min RSRP (dBm)",
-    "Max RSRP (dBm)",
-    "SNR mean (dB)",
+    ...(includeDiagnostics
+      ? [
+          "Battery SoC mean (%)",
+          "Min battery SoC (%)",
+          "Max battery SoC (%)",
+          "Battery voltage (mV)",
+          "RSRP mean (dBm)",
+          "Min RSRP (dBm)",
+          "Max RSRP (dBm)",
+          "SNR mean (dB)",
+        ]
+      : []),
+    ...series.flatMap((s) => [
+      `${s.label} mean`,
+      `${s.label} min`,
+      `${s.label} max`,
+    ]),
   ];
   const lines = [header.map(escapeCsvField).join(",")];
   for (const bucket of timeline.buckets) {
     const row = [
       formatTimestamp(bucket.start),
       String(bucket.count),
-      cell(bucket.minBytes),
-      cell(bucket.meanBytes, 1),
-      cell(bucket.maxBytes),
+      ...(includeBytes
+        ? [cell(bucket.minBytes), cell(bucket.meanBytes, 1), cell(bucket.maxBytes)]
+        : []),
       cell(bucket.lastCounter),
       cell(bucket.minCounter),
       cell(bucket.maxCounter),
-      cell(bucket.meanBatterySoc, 1),
-      cell(bucket.minBatterySoc),
-      cell(bucket.maxBatterySoc),
-      cell(bucket.lastBatteryVoltage),
-      cell(bucket.meanRsrp, 1),
-      cell(bucket.minRsrp),
-      cell(bucket.maxRsrp),
-      cell(bucket.meanSnr, 1),
+      ...(includeDiagnostics
+        ? [
+            cell(bucket.meanBatterySoc, 1),
+            cell(bucket.minBatterySoc),
+            cell(bucket.maxBatterySoc),
+            cell(bucket.lastBatteryVoltage),
+            cell(bucket.meanRsrp, 1),
+            cell(bucket.minRsrp),
+            cell(bucket.maxRsrp),
+            cell(bucket.meanSnr, 1),
+          ]
+        : []),
+      ...series.flatMap((s) => {
+        const stats = bucket.series[s.key];
+        return [
+          cell(stats?.mean ?? null, 2),
+          cell(stats?.min ?? null, 2),
+          cell(stats?.max ?? null, 2),
+        ];
+      }),
     ];
     lines.push(row.map(escapeCsvField).join(","));
   }

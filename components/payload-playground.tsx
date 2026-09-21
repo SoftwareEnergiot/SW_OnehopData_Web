@@ -12,8 +12,10 @@ import {
   PayloadDecodeError,
   type PayloadAnalysis,
 } from "@/lib/payload-decoder";
+import { useActiveEnvironment } from "@/components/environment-provider";
+import { ENVIRONMENT_PARAM } from "@/lib/environments";
 import { toast } from "sonner";
-import { FlaskConical, Send, Wand2 } from "lucide-react";
+import { FlaskConical, Info, Send, Wand2 } from "lucide-react";
 
 // Canonical example payloads from the protocol documents — friendly defaults so
 // the playground is useful on first load. V1 is the current device format; V0
@@ -29,6 +31,10 @@ const V0_EXAMPLE_HEX =
 const EXAMPLE_HEX = V1_EXAMPLE_HEX;
 
 export function PayloadPlayground() {
+  // Where "Send to endpoint" writes. Named explicitly on the request, so the
+  // payload lands in the environment on screen and nowhere else.
+  const { environment, schema } = useActiveEnvironment();
+
   const [hex, setHex] = useState(EXAMPLE_HEX);
   const [analysis, setAnalysis] = useState<PayloadAnalysis | null>(null);
   const [sending, setSending] = useState(false);
@@ -65,18 +71,33 @@ export function PayloadPlayground() {
 
     setSending(true);
     try {
-      const response = await fetch("/api/payloads", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: bytes,
-      });
-      // The endpoint answers with a status only — no body to read. The decoded
-      // view below comes from decoding the same bytes locally.
-      if (response.ok) {
-        toast.success(`Payload accepted (HTTP ${response.status})`);
+      const response = await fetch(
+        `/api/payloads?${ENVIRONMENT_PARAM}=${encodeURIComponent(environment.name)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: new Uint8Array(bytes),
+        },
+      );
+      // A request that names an environment gets a JSON answer, so a database
+      // rejection — the REE device-UID constraint above all — is reported as
+      // itself rather than hidden behind an accepted status.
+      const result = await response.json().catch(() => null);
+
+      if (response.ok && result?.success) {
+        toast.success(
+          `Stored ${result.stored} row(s) in ${result.table} (${result.environment}).`,
+        );
         decodeLocally();
       } else {
-        toast.error(`Endpoint rejected the payload (HTTP ${response.status})`);
+        // Shown verbatim: the payload is not silently rewritten, and it is
+        // never retried against another environment.
+        toast.error(result?.error ?? `Endpoint rejected the payload (HTTP ${response.status})`, {
+          description: [result?.details, result?.hint]
+            .filter(Boolean)
+            .join(" "),
+          duration: 10000,
+        });
       }
     } catch (error) {
       toast.error(
@@ -115,6 +136,34 @@ export function PayloadPlayground() {
               <span className="font-mono">10 + 28 · N</span> bytes.
             </p>
           </div>
+          {/* Where a send lands, and what the table will accept. The
+              constraint is the database's; the frontend only states it. */}
+          <p className="flex items-start gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              Sending stores the payload in{" "}
+              <span className="font-mono">{schema.table}</span> (
+              {environment.name}).
+              {schema.writeDeviceUids?.length ? (
+                <>
+                  {" "}
+                  That table only accepts payloads whose device UID is{" "}
+                  <span className="font-mono">
+                    {schema.writeDeviceUids.join(", ")}
+                  </span>
+                  ; any other UID is rejected by the database and the rejection
+                  is shown here.
+                </>
+              ) : null}
+              {!schema.capabilities.rawPayloadInspector && (
+                <>
+                  {" "}
+                  Each sample in the report becomes one row; the raw frame
+                  itself is not stored by this table.
+                </>
+              )}
+            </span>
+          </p>
           <div className="flex flex-wrap gap-2">
             <Button onClick={decodeLocally} className="gap-2">
               <Wand2 className="h-4 w-4" />
@@ -127,7 +176,7 @@ export function PayloadPlayground() {
               className="gap-2"
             >
               <Send className="h-4 w-4" />
-              {sending ? "Sending…" : "Send to endpoint"}
+              {sending ? "Sending…" : `Send to ${environment.name}`}
             </Button>
             <Button
               onClick={() => setHex(V1_EXAMPLE_HEX)}

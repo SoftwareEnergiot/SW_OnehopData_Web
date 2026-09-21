@@ -4,10 +4,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PayloadPlayground } from "@/components/payload-playground";
 import { ReceivedPayloads } from "@/components/received-payloads";
 import { UserMenu } from "@/components/user-menu";
+import { EnvironmentBadge } from "@/components/environment-selector";
+import { useActiveEnvironment } from "@/components/environment-provider";
 import { FlaskConical, Database } from "lucide-react";
 import Image from "next/image";
 
 export function PayloadDashboard() {
+  // Guaranteed by <EnvironmentGuard>, which is what renders this dashboard.
+  const { environment } = useActiveEnvironment();
+
   return (
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-[9000] flex h-16 items-center justify-between border-b border-border bg-white px-4 shadow-sm sm:px-6">
@@ -29,7 +34,15 @@ export function PayloadDashboard() {
             </span>
           </div>
         </div>
-        <UserMenu />
+        <div className="flex items-center gap-3">
+          {/* Which dataset the page is looking at, and whether it is the
+              production one — carried in the chrome so it is never in doubt. */}
+          <EnvironmentBadge
+            environment={environment}
+            className="border-r border-border pr-3"
+          />
+          <UserMenu />
+        </div>
       </header>
 
       <div className="flex-1 bg-muted/40 px-4 py-6 sm:px-6 lg:px-8">

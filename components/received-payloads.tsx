@@ -30,13 +30,17 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { PayloadAnalysisView } from "@/components/payload-analysis";
+import { PayloadRecordView } from "@/components/payload-record-view";
 import { PayloadCharts } from "@/components/payload-charts";
+import { PayloadCell, isNumericField } from "@/components/payload-cell";
+import { useActiveEnvironment } from "@/components/environment-provider";
 import { analyzePayload, hexToBytes } from "@/lib/payload-decoder";
-import { formatErrorMask } from "@/lib/payload-errors";
 import { createdAtBoundFromInput, formatCreatedAt } from "@/lib/utils";
-import { CSV_COLUMNS, buildCsv, downloadCsv } from "@/lib/payload-csv";
+import { buildCsv, downloadCsv } from "@/lib/payload-csv";
 import { NO_DEVICE_UID } from "@/lib/payload-filters";
-import type { PayloadRecord } from "@/lib/types";
+import { ENVIRONMENT_PARAM } from "@/lib/environments";
+import { columnValue, fieldLabel, fieldOf } from "@/lib/payload-schemas";
+import type { PayloadRecord, PayloadRow } from "@/lib/types";
 
 // One entry of GET /api/payloads/devices.
 interface DeviceOption {
@@ -64,11 +68,27 @@ const PAGE_SIZES = [25, 50, 100, 200];
 // rows off the end.
 const EXPORT_CHUNK = 1000;
 
-// Every CSV column key, used to seed the "all selected" default.
-const ALL_COLUMN_KEYS = CSV_COLUMNS.map((column) => column.key);
-
 export function ReceivedPayloads() {
-  const [rows, setRows] = useState<PayloadRecord[]>([]);
+  // The dataset this view reads. Guaranteed present: the dashboard only
+  // renders behind <EnvironmentGuard>.
+  const { environment, schema } = useActiveEnvironment();
+
+  // Every CSV column the active schema offers, used to seed "all selected".
+  const allColumnKeys = useMemo(
+    () => schema.csvColumns.map((column) => column.key),
+    [schema],
+  );
+
+  // The columns of the list, resolved from the schema's field metadata.
+  const listFields = useMemo(
+    () =>
+      schema.listColumns
+        .map((key) => fieldOf(schema, key))
+        .filter((field): field is NonNullable<typeof field> => field !== undefined),
+    [schema],
+  );
+
+  const [rows, setRows] = useState<PayloadRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -95,7 +115,7 @@ export function ReceivedPayloads() {
   // Columns included in a CSV export, keyed by CSV_COLUMNS[].key. All start
   // selected; the picker never lets the set fall to empty.
   const [selectedColumns, setSelectedColumns] = useState<Set<string>>(
-    () => new Set(ALL_COLUMN_KEYS),
+    () => new Set(schema.csvColumns.map((column) => column.key)),
   );
   // True while a CSV export is gathering rows, to disable the button and show
   // progress.
@@ -113,6 +133,9 @@ export function ReceivedPayloads() {
       const toBound = createdAtBoundFromInput(to, "to");
       if (toBound) params.set("to", toBound);
       if (deviceUid) params.set("device_uid", deviceUid);
+      // Named on every request, so a row can only ever come from the active
+      // environment's table.
+      params.set(ENVIRONMENT_PARAM, environment.name);
 
       const response = await fetch(`/api/payloads?${params.toString()}`, {
         cache: "no-store",
@@ -122,7 +145,7 @@ export function ReceivedPayloads() {
         setRows(result.data ?? []);
         setTotal(result.total ?? 0);
       } else {
-        toast.error(result.error ?? "Failed to load payloads");
+        toast.error(result.details ?? result.error ?? "Failed to load payloads");
       }
     } catch {
       // The list needs Supabase configured; fail quietly with a hint.
@@ -130,7 +153,7 @@ export function ReceivedPayloads() {
     } finally {
       setLoading(false);
     }
-  }, [from, to, deviceUid, page, pageSize]);
+  }, [from, to, deviceUid, page, pageSize, environment.name]);
 
   useEffect(() => {
     fetchPayloads();
@@ -140,7 +163,10 @@ export function ReceivedPayloads() {
   // sends its first payload shows up without reloading the page.
   const fetchDevices = useCallback(async () => {
     try {
-      const response = await fetch("/api/payloads/devices", { cache: "no-store" });
+      const response = await fetch(
+        `/api/payloads/devices?${ENVIRONMENT_PARAM}=${encodeURIComponent(environment.name)}`,
+        { cache: "no-store" },
+      );
       const result = await response.json();
       if (result.success) {
         setDevices(result.devices ?? []);
@@ -149,19 +175,25 @@ export function ReceivedPayloads() {
     } catch {
       // The list is a convenience; the table still works without it.
     }
-  }, []);
+  }, [environment.name]);
 
   useEffect(() => {
     fetchDevices();
   }, [fetchDevices]);
 
+  // A row's identity, read through the schema's primary key.
+  const rowId = useCallback(
+    (row: PayloadRow) => String(columnValue(row, schema.primaryKey)),
+    [schema.primaryKey],
+  );
+
   // Land on the requested edge of a page the inspector just navigated into.
   useEffect(() => {
     if (!selectEdge || rows.length === 0) return;
     const row = selectEdge === "first" ? rows[0] : rows[rows.length - 1];
-    setSelectedId(row.id);
+    setSelectedId(rowId(row));
     setSelectEdge(null);
-  }, [rows, selectEdge]);
+  }, [rows, selectEdge, rowId]);
 
   // Any change to the range or the page size restarts paging from the first
   // page, so the offset can never point past the new result set.
@@ -210,18 +242,18 @@ export function ReceivedPayloads() {
   }, []);
 
   const selectAllColumns = useCallback(() => {
-    setSelectedColumns(new Set(ALL_COLUMN_KEYS));
-  }, []);
+    setSelectedColumns(new Set(allColumnKeys));
+  }, [allColumnKeys]);
 
   // "Deselect all" keeps the first column selected — an export needs at least
   // one field, and this leaves an obvious one to build back up from.
   const deselectAllColumns = useCallback(() => {
-    setSelectedColumns(new Set([ALL_COLUMN_KEYS[0]]));
-  }, []);
+    setSelectedColumns(new Set([allColumnKeys[0]]));
+  }, [allColumnKeys]);
 
   // Fetch every payload in the current range (all pages), most-recent first.
-  const fetchAllInRange = useCallback(async (): Promise<PayloadRecord[]> => {
-    const all: PayloadRecord[] = [];
+  const fetchAllInRange = useCallback(async (): Promise<PayloadRow[]> => {
+    const all: PayloadRow[] = [];
     let offset = 0;
     for (;;) {
       const params = new URLSearchParams({
@@ -233,15 +265,16 @@ export function ReceivedPayloads() {
       const toBound = createdAtBoundFromInput(to, "to");
       if (toBound) params.set("to", toBound);
       if (deviceUid) params.set("device_uid", deviceUid);
+      params.set(ENVIRONMENT_PARAM, environment.name);
 
       const response = await fetch(`/api/payloads?${params.toString()}`, {
         cache: "no-store",
       });
       const result = await response.json();
       if (!result.success) {
-        throw new Error(result.error ?? "Failed to load payloads");
+        throw new Error(result.details ?? result.error ?? "Failed to load payloads");
       }
-      const batch: PayloadRecord[] = result.data ?? [];
+      const batch: PayloadRow[] = result.data ?? [];
       all.push(...batch);
       const count: number = result.total ?? all.length;
       // Stop once we've collected the reported total, or a short page signals
@@ -250,7 +283,7 @@ export function ReceivedPayloads() {
       offset += EXPORT_CHUNK;
     }
     return all;
-  }, [from, to, deviceUid]);
+  }, [from, to, deviceUid, environment.name]);
 
   // Gather the full range and download it as CSV using the selected columns.
   const handleDownloadCsv = useCallback(async () => {
@@ -258,36 +291,47 @@ export function ReceivedPayloads() {
     try {
       const data = await fetchAllInRange();
       if (data.length === 0) {
-        toast.error("No payloads to download in the selected range.");
+        toast.error(
+          `No ${schema.rowNounPlural} to download in the selected range.`,
+        );
         return;
       }
-      const csv = buildCsv(data, selectedColumns);
+      // The active schema's columns, so an export always describes the table
+      // it was read from.
+      const csv = buildCsv(data, selectedColumns, schema.csvColumns);
       const stamp = new Date()
         .toISOString()
         .slice(0, 19)
         .replace(/[:T]/g, "-");
-      downloadCsv(csv, `payloads-${stamp}.csv`);
-      toast.success(`Downloaded ${data.length} payload(s).`);
+      downloadCsv(csv, `${schema.csvBasename}-${stamp}.csv`);
+      toast.success(`Downloaded ${data.length} ${schema.rowNoun}(s).`);
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Could not export payloads.",
+        error instanceof Error
+          ? error.message
+          : `Could not export ${schema.rowNounPlural}.`,
       );
     } finally {
       setExporting(false);
     }
-  }, [fetchAllInRange, selectedColumns]);
+  }, [fetchAllInRange, selectedColumns, schema]);
 
   const hasFilter = from !== "" || to !== "" || deviceUid !== "";
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const firstRowNumber = total === 0 ? 0 : page * pageSize + 1;
   const lastRowNumber = page * pageSize + rows.length;
 
-  const selectedIndex = rows.findIndex((row) => row.id === selectedId);
+  const selectedIndex = rows.findIndex((row) => rowId(row) === selectedId);
   const selected = selectedIndex === -1 ? null : rows[selectedIndex];
 
+  // Only a dataset that stores the raw frame can be inspected byte by byte;
+  // the others are already decoded and are rendered from their schema instead.
   const selectedAnalysis = useMemo(
-    () => (selected ? safeAnalyze(selected.payload_hex) : null),
-    [selected],
+    () =>
+      selected && schema.capabilities.rawPayloadInspector
+        ? safeAnalyze((selected as PayloadRecord).payload_hex)
+        : null,
+    [selected, schema.capabilities.rawPayloadInspector],
   );
 
   // Position of the selection among *all* payloads in the range, not just the
@@ -303,7 +347,7 @@ export function ReceivedPayloads() {
       if (selectedIndex === -1) return;
       const next = rows[selectedIndex + delta];
       if (next) {
-        setSelectedId(next.id);
+        setSelectedId(rowId(next));
       } else if (delta === 1 && page < pageCount - 1) {
         setSelectEdge("first");
         setPage((p) => p + 1);
@@ -312,7 +356,7 @@ export function ReceivedPayloads() {
         setPage((p) => p - 1);
       }
     },
-    [rows, selectedIndex, page, pageCount],
+    [rows, selectedIndex, page, pageCount, rowId],
   );
 
   return (
@@ -349,6 +393,7 @@ export function ReceivedPayloads() {
               className="w-auto"
             />
           </div>
+          {schema.capabilities.deviceFilter && (
           <div className="grid gap-1.5">
             <Label htmlFor="device-uid" className="text-xs text-muted-foreground">
               Device
@@ -378,6 +423,7 @@ export function ReceivedPayloads() {
                 )}
             </select>
           </div>
+          )}
           {hasFilter && (
             <Button
               variant="ghost"
@@ -411,7 +457,12 @@ export function ReceivedPayloads() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Database className="h-4 w-4 text-primary" />
-            Received payloads
+            <span>
+              Received <span className="lowercase">{schema.rowNounPlural}</span>
+            </span>
+            <span className="font-mono text-xs font-normal text-muted-foreground">
+              {schema.table}
+            </span>
           </CardTitle>
           <CardAction>
             <div className="flex flex-wrap items-center gap-2">
@@ -421,7 +472,7 @@ export function ReceivedPayloads() {
                     <SlidersHorizontal className="h-4 w-4" />
                     Columns
                     <span className="text-xs text-muted-foreground">
-                      ({selectedColumns.size}/{CSV_COLUMNS.length})
+                      ({selectedColumns.size}/{schema.csvColumns.length})
                     </span>
                   </Button>
                 </DropdownMenuTrigger>
@@ -446,7 +497,7 @@ export function ReceivedPayloads() {
                     </Button>
                   </div>
                   <DropdownMenuSeparator />
-                  {CSV_COLUMNS.map((column) => {
+                  {schema.csvColumns.map((column) => {
                     const checked = selectedColumns.has(column.key);
                     const isLast = checked && selectedColumns.size === 1;
                     return (
@@ -504,82 +555,66 @@ export function ReceivedPayloads() {
           ) : rows.length === 0 ? (
             hasFilter ? (
               <p className="py-8 text-center text-sm text-muted-foreground">
-                No payloads match the selected filter.
+                No {schema.rowNounPlural} match the selected filter.
               </p>
             ) : (
               <p className="py-8 text-center text-sm text-muted-foreground">
-                No payloads stored yet. Send one to{" "}
-                <span className="font-mono">POST /api/payloads</span> or use the
-                Playground.
+                No {schema.rowNounPlural} stored in{" "}
+                <span className="font-mono">{schema.table}</span> yet. Send a
+                payload to <span className="font-mono">POST /api/payloads</span>{" "}
+                or use the Playground.
               </p>
             )
           ) : (
             <>
+              {/* Columns, labels and units all come from the active schema,
+                  so one table renders either environment's rows. */}
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Received</TableHead>
-                    <TableHead>Device UID</TableHead>
-                    <TableHead className="text-right">Ver.</TableHead>
-                    <TableHead className="text-right">Samples</TableHead>
-                    <TableHead>Error mask</TableHead>
-                    <TableHead className="text-right">Counter</TableHead>
-                    <TableHead className="text-right">Bytes</TableHead>
+                    {listFields.map((field) => (
+                      <TableHead
+                        key={field.key}
+                        className={isNumericField(field) ? "text-right" : undefined}
+                      >
+                        {fieldLabel(field)}
+                      </TableHead>
+                    ))}
                     <TableHead />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {rows.map((row) => (
-                    <TableRow
-                      key={row.id}
-                      data-state={row.id === selectedId ? "selected" : undefined}
-                    >
-                      <TableCell className="font-mono text-xs">
-                        {formatCreatedAt(row.created_at)}
-                      </TableCell>
-                      {/* V0 payloads carry no UID, and neither do rows stored
-                          before scripts/003 added the column. */}
-                      <TableCell className="font-mono text-xs">
-                        {row.device_uid ?? (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right font-mono">
-                        {row.payload_version}
-                      </TableCell>
-                      <TableCell className="text-right font-mono">
-                        {row.sample_count}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={
-                            row.error_mask === 0 ? "secondary" : "destructive"
-                          }
-                        >
-                          {formatErrorMask(row.error_mask)}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right font-mono">
-                        {row.reporting_counter}
-                      </TableCell>
-                      <TableCell className="text-right font-mono">
-                        {row.byte_length}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() =>
-                            setSelectedId((prev) =>
-                              prev === row.id ? null : row.id,
-                            )
-                          }
-                        >
-                          {selectedId === row.id ? "Hide" : "Inspect"}
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {rows.map((row) => {
+                    const id = rowId(row);
+                    return (
+                      <TableRow
+                        key={id}
+                        data-state={id === selectedId ? "selected" : undefined}
+                      >
+                        {listFields.map((field) => (
+                          <TableCell
+                            key={field.key}
+                            className={
+                              isNumericField(field) ? "text-right" : undefined
+                            }
+                          >
+                            <PayloadCell row={row} field={field} />
+                          </TableCell>
+                        ))}
+                        <TableCell className="text-right">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() =>
+                              setSelectedId((prev) => (prev === id ? null : id))
+                            }
+                          >
+                            {selectedId === id ? "Hide" : "Inspect"}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
 
@@ -589,7 +624,8 @@ export function ReceivedPayloads() {
                   <span className="font-mono">
                     {firstRowNumber}–{lastRowNumber}
                   </span>{" "}
-                  of <span className="font-mono">{total}</span> payload(s)
+                  of <span className="font-mono">{total}</span>{" "}
+                  {schema.rowNoun}(s)
                   {hasFilter ? " in the selected time range" : ""} · page{" "}
                   <span className="font-mono">{page + 1}</span> of{" "}
                   <span className="font-mono">{pageCount}</span>
@@ -645,9 +681,14 @@ export function ReceivedPayloads() {
       {selected && (
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2 capitalize">
               <Database className="h-4 w-4 text-primary" />
-              Payload {formatCreatedAt(selected.created_at)}
+              {schema.rowNoun}{" "}
+              <span className="font-normal normal-case">
+                {formatCreatedAt(
+                  String(columnValue(selected, schema.receivedKey)),
+                )}
+              </span>
             </CardTitle>
             <CardAction>
               <div className="flex items-center gap-2">
@@ -687,12 +728,16 @@ export function ReceivedPayloads() {
             </CardAction>
           </CardHeader>
           <CardContent>
-            {selectedAnalysis ? (
-              <PayloadAnalysisView analysis={selectedAnalysis} />
+            {schema.capabilities.rawPayloadInspector ? (
+              selectedAnalysis ? (
+                <PayloadAnalysisView analysis={selectedAnalysis} />
+              ) : (
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  This payload could not be decoded from its stored hex.
+                </p>
+              )
             ) : (
-              <p className="py-4 text-center text-sm text-muted-foreground">
-                This payload could not be decoded from its stored hex.
-              </p>
+              <PayloadRecordView row={selected} schema={schema} />
             )}
           </CardContent>
         </Card>

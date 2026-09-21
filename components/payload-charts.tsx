@@ -28,8 +28,11 @@ import {
 import { Label } from "@/components/ui/label";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -41,6 +44,7 @@ import {
   median,
   niceScale,
   type Scale,
+  type SeriesSpec,
   type SummaryPoint,
   type Timeline,
 } from "@/lib/payload-timeline";
@@ -53,6 +57,14 @@ import {
 } from "@/lib/chart-export";
 import { downloadCsv } from "@/lib/payload-csv";
 import { createdAtBoundFromInput } from "@/lib/utils";
+import { useActiveEnvironment } from "@/components/environment-provider";
+import {
+  fieldLabel,
+  fieldOf,
+  type PayloadFieldDef,
+  type PayloadSchema,
+} from "@/lib/payload-schemas";
+import { ENVIRONMENT_PARAM } from "@/lib/environments";
 import { toast } from "sonner";
 import {
   Activity,
@@ -60,9 +72,11 @@ import {
   ChartLine,
   Download,
   FileImage,
+  Gauge,
   Hash,
   Sheet,
   SignalHigh,
+  SlidersHorizontal,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -98,6 +112,17 @@ interface PayloadChartsProps {
 }
 
 export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
+  // Which dataset is charted, and what its columns mean. Guaranteed present:
+  // this card only renders inside the environment guard.
+  const { environment, schema } = useActiveEnvironment();
+
+  // Measurement columns the reader has chosen to plot. Only datasets that
+  // declare chartable sensor columns offer this; Development's series each
+  // have a chart of their own already.
+  const [selectedSeries, setSelectedSeries] = useState<string[]>(
+    () => schema.defaultChartSeries,
+  );
+
   const [points, setPoints] = useState<SummaryPoint[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -123,6 +148,9 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
     if (fromBound) params.set("from", fromBound);
     if (toBound) params.set("to", toBound);
     if (deviceUid) params.set("device_uid", deviceUid);
+    // Names the dataset explicitly on every request: the endpoint never
+    // guesses, so these points can only come from the active environment.
+    params.set(ENVIRONMENT_PARAM, environment.name);
 
     fetch(`/api/payloads/summary?${params.toString()}`, { cache: "no-store" })
       .then((response) => response.json())
@@ -146,7 +174,28 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
     return () => {
       cancelled = true;
     };
-  }, [fromBound, toBound, deviceUid, refreshKey]);
+  }, [fromBound, toBound, deviceUid, refreshKey, environment.name]);
+
+  // The chosen measurement columns, in the schema's own order, each carrying
+  // the valid-sample bit that says whether a reading is a measurement at all.
+  const seriesFields = useMemo(
+    () =>
+      schema.chartSeries
+        .filter((key) => selectedSeries.includes(key))
+        .map((key) => fieldOf(schema, key))
+        .filter((field): field is PayloadFieldDef => field !== undefined),
+    [schema, selectedSeries],
+  );
+
+  const seriesSpecs = useMemo<SeriesSpec[]>(
+    () =>
+      seriesFields.map((field) => ({
+        key: field.key,
+        validMaskKey: field.validBit === undefined ? undefined : "valid_sample_mask",
+        validBit: field.validBit,
+      })),
+    [seriesFields],
+  );
 
   const timeline = useMemo(
     () =>
@@ -154,8 +203,9 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
         from: fromBound ? Date.parse(fromBound) : null,
         to: toBound ? Date.parse(toBound) : null,
         bucketMs,
+        series: seriesSpecs,
       }),
-    [points, fromBound, toBound, bucketMs],
+    [points, fromBound, toBound, bucketMs, seriesSpecs],
   );
 
   // A narrow interval over a wide range hits the bucket ceiling: say so rather
@@ -173,8 +223,16 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
     if (!timeline) return;
     try {
       downloadCsv(
-        buildTimelineCsv(timeline),
-        `reception-timeline-${exportStamp()}.csv`,
+        buildTimelineCsv(timeline, {
+          includeBytes: schema.capabilities.byteSizeChart,
+          includeDiagnostics: schema.capabilities.diagnosticsCharts,
+          countLabel: schema.rowNounPlural,
+          series: seriesFields.map((field) => ({
+            key: field.key,
+            label: fieldLabel(field),
+          })),
+        }),
+        `reception-timeline-${schema.id}-${exportStamp()}.csv`,
       );
       toast.success(`Exported ${timeline.buckets.length} bucket(s).`);
     } catch (error) {
@@ -182,9 +240,9 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
         error instanceof Error ? error.message : "Could not export the data.",
       );
     }
-  }, [timeline]);
+  }, [timeline, schema, seriesFields]);
 
-  // The three plots, stacked into one PNG image at device resolution.
+  // The plots, stacked into one PNG image at device resolution.
   const handleExportPng = useCallback(async () => {
     const container = chartsRef.current;
     if (!container) return;
@@ -200,7 +258,7 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
         })
         .filter((f): f is ChartFigure => f !== null);
       const blob = await chartsToPngBlob(figures, container);
-      downloadBlob(blob, `reception-timeline-${exportStamp()}.png`);
+      downloadBlob(blob, `reception-timeline-${schema.id}-${exportStamp()}.png`);
       toast.success("Exported charts as PNG.");
     } catch (error) {
       toast.error(
@@ -209,6 +267,16 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
     } finally {
       setExportingPng(false);
     }
+  }, [schema.id]);
+
+  // Toggle one measurement series. Unlike the CSV column picker this may fall
+  // to empty: a reader who wants only the reception charts should get them.
+  const toggleSeries = useCallback((key: string) => {
+    setSelectedSeries((current) =>
+      current.includes(key)
+        ? current.filter((item) => item !== key)
+        : [...current, key],
+    );
   }, []);
 
   return (
@@ -288,6 +356,58 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
                 ))}
               </select>
             </div>
+            {/* Only datasets whose schema declares chartable sensor columns
+                offer this; the Development series each have their own chart. */}
+            {schema.chartSeries.length > 0 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-2">
+                    <SlidersHorizontal className="h-4 w-4" />
+                    Series
+                    <span className="text-xs text-muted-foreground">
+                      ({seriesFields.length}/{schema.chartSeries.length})
+                    </span>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="max-h-80 w-72 overflow-y-auto">
+                  <DropdownMenuLabel>Measurement series</DropdownMenuLabel>
+                  <div className="flex gap-1 px-1 py-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 flex-1"
+                      onClick={() => setSelectedSeries(schema.chartSeries)}
+                    >
+                      Select all
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 flex-1"
+                      onClick={() => setSelectedSeries([])}
+                    >
+                      Deselect all
+                    </Button>
+                  </div>
+                  <DropdownMenuSeparator />
+                  {schema.chartSeries.map((key) => {
+                    const field = fieldOf(schema, key);
+                    if (!field) return null;
+                    return (
+                      <DropdownMenuCheckboxItem
+                        key={key}
+                        checked={selectedSeries.includes(key)}
+                        // Keep the menu open so several can be toggled at once.
+                        onSelect={(e) => e.preventDefault()}
+                        onCheckedChange={() => toggleSeries(key)}
+                      >
+                        {fieldLabel(field)}
+                      </DropdownMenuCheckboxItem>
+                    );
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -329,15 +449,17 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
           </p>
         ) : !timeline || timeline.total === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">
-            {loading ? "Loading…" : "No payloads to chart in this time range."}
+            {loading
+              ? "Loading…"
+              : `No ${schema.rowNounPlural} to chart in this time range.`}
           </p>
         ) : (
           <>
             {truncated && (
               <p className="flex items-center gap-2 text-xs text-muted-foreground">
                 <TriangleAlert className="h-3.5 w-3.5" />
-                Charting the first 20,000 payloads of this range — narrow the
-                range to chart all of them.
+                Charting the first 20,000 {schema.rowNounPlural} of this
+                range — narrow the range to chart all of them.
               </p>
             )}
             {clamped && (
@@ -357,15 +479,39 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
                 loading ? "opacity-60" : "opacity-100"
               }`}
             >
-              <FrequencyChart timeline={timeline} />
-              <ByteSizeChart timeline={timeline} />
-              <CounterChart timeline={timeline} />
+              <FrequencyChart timeline={timeline} schema={schema} />
+              {/* Only a dataset that stores the raw frame has a size to plot. */}
+              {schema.capabilities.byteSizeChart && (
+                <ByteSizeChart timeline={timeline} schema={schema} />
+              )}
+              <CounterChart timeline={timeline} schema={schema} />
               {/* V1 only: a range of V0 payloads carries no diagnostics, and an
                   empty plot says less than no plot at all. */}
-              {timeline.batteryCount > 0 && <BatteryChart timeline={timeline} />}
-              {timeline.signalCount > 0 && <SignalChart timeline={timeline} />}
+              {schema.capabilities.diagnosticsCharts &&
+                timeline.batteryCount > 0 && (
+                  <BatteryChart timeline={timeline} schema={schema} />
+                )}
+              {schema.capabilities.diagnosticsCharts &&
+                timeline.signalCount > 0 && (
+                  <SignalChart timeline={timeline} schema={schema} />
+                )}
+              {/* Sensor channels the active schema declares chartable. */}
+              {seriesFields.map((field) => (
+                <SeriesChart
+                  key={field.key}
+                  timeline={timeline}
+                  schema={schema}
+                  field={field}
+                />
+              ))}
             </div>
-            {showValues && <ValuesTable timeline={timeline} />}
+            {showValues && (
+              <ValuesTable
+                timeline={timeline}
+                schema={schema}
+                series={seriesFields}
+              />
+            )}
           </>
         )}
       </CardContent>
@@ -375,7 +521,12 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
 
 /* ------------------------------------------------------------------ charts */
 
-function FrequencyChart({ timeline }: { timeline: Timeline }) {
+interface ChartProps {
+  timeline: Timeline;
+  schema: PayloadSchema;
+}
+
+function FrequencyChart({ timeline, schema }: ChartProps) {
   const counts = timeline.buckets.map((b) => b.count);
   const max = Math.max(...counts);
   const min = Math.min(...counts);
@@ -390,10 +541,11 @@ function FrequencyChart({ timeline }: { timeline: Timeline }) {
       <figcaption className="space-y-0.5">
         <h3 className="flex items-center gap-2 text-sm font-semibold">
           <Activity className="h-3.5 w-3.5 text-primary" />
-          Payloads received per {formatDuration(timeline.bucketMs)}
+          <span className="capitalize">{schema.rowNounPlural}</span> received
+          per {formatDuration(timeline.bucketMs)}
         </h3>
         <p className="text-xs text-muted-foreground">
-          {formatCount(timeline.total)} payload(s) ·{" "}
+          {formatCount(timeline.total)} {schema.rowNoun}(s) ·{" "}
           {min === max ? (
             <>
               perfectly constant at <span className="font-mono">{max}</span> per{" "}
@@ -419,13 +571,14 @@ function FrequencyChart({ timeline }: { timeline: Timeline }) {
         scale={scale}
         reference={typical > 0 ? typical : null}
         formatValue={formatCount}
-        valueName="payloads"
+        valueName={schema.rowNounPlural}
+        noun={schema.rowNoun}
       />
     </figure>
   );
 }
 
-function ByteSizeChart({ timeline }: { timeline: Timeline }) {
+function ByteSizeChart({ timeline, schema }: ChartProps) {
   const values = timeline.buckets.map((b) => b.meanBytes);
   const { minBytes, maxBytes } = timeline;
   const constant = minBytes !== null && minBytes === maxBytes;
@@ -466,12 +619,13 @@ function ByteSizeChart({ timeline }: { timeline: Timeline }) {
         reference={constant ? null : minBytes}
         formatValue={formatCount}
         valueName="bytes"
+        noun={schema.rowNoun}
       />
     </figure>
   );
 }
 
-function CounterChart({ timeline }: { timeline: Timeline }) {
+function CounterChart({ timeline, schema }: ChartProps) {
   const { minCounter, maxCounter, firstCounter, lastCounter, counterResets } =
     timeline;
   // The counter is a whole number too — no half-frame ticks.
@@ -542,6 +696,7 @@ function CounterChart({ timeline }: { timeline: Timeline }) {
         scale={scale}
         formatValue={formatCount}
         valueName="counter"
+        noun={schema.rowNoun}
       />
     </figure>
   );
@@ -551,7 +706,7 @@ function CounterChart({ timeline }: { timeline: Timeline }) {
 // bucket's min-max spread behind it. The scale is pinned to 0-100 rather than
 // fitted to the data: a battery drifting 87 → 85 % should read as the near-flat
 // line it is, not as a cliff produced by an auto-fitted axis.
-function BatteryChart({ timeline }: { timeline: Timeline }) {
+function BatteryChart({ timeline, schema }: ChartProps) {
   const {
     batteryCount,
     minBatterySoc,
@@ -629,6 +784,7 @@ function BatteryChart({ timeline }: { timeline: Timeline }) {
         scale={scale}
         formatValue={formatCount}
         valueName="%"
+        noun={schema.rowNoun}
       />
     </figure>
   );
@@ -637,7 +793,7 @@ function BatteryChart({ timeline }: { timeline: Timeline }) {
 // V1 radio coverage. RSRP is negative and closer to zero is better, so the
 // axis reads "less negative = stronger" — worth saying in the caption, because
 // the line going up meaning better signal is not obvious from a dBm axis.
-function SignalChart({ timeline }: { timeline: Timeline }) {
+function SignalChart({ timeline, schema }: ChartProps) {
   const { signalCount, minRsrp, maxRsrp, minSnr, maxSnr, total } = timeline;
   const scale = niceScale(minRsrp ?? -140, maxRsrp ?? -44, { integer: true });
 
@@ -690,6 +846,94 @@ function SignalChart({ timeline }: { timeline: Timeline }) {
         scale={scale}
         formatValue={formatCount}
         valueName="dBm"
+        noun={schema.rowNoun}
+      />
+    </figure>
+  );
+}
+
+/**
+ * One sensor channel declared chartable by the active schema: the per-bucket
+ * mean with the bucket's min-max spread behind it.
+ *
+ * Readings whose valid-sample bit was clear never reach this — the timeline
+ * drops them — so a sensor that failed leaves a gap rather than a line at 0.
+ */
+function SeriesChart({
+  timeline,
+  schema,
+  field,
+}: ChartProps & { field: PayloadFieldDef }) {
+  const stats = timeline.series[field.key];
+  const decimals = field.decimals ?? 0;
+  const format = (value: number) =>
+    Number.isInteger(value) && decimals === 0
+      ? value.toLocaleString("en-US")
+      : value.toLocaleString("en-US", {
+          minimumFractionDigits: decimals,
+          maximumFractionDigits: decimals,
+        });
+
+  if (!stats || stats.count === 0) {
+    return (
+      <figure className="space-y-1">
+        <figcaption className="space-y-0.5">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <Gauge className="h-3.5 w-3.5 text-primary" />
+            {fieldLabel(field)}
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            No reading in this range — every {schema.rowNoun} either omits this
+            channel or reported its sensor as not read.
+          </p>
+        </figcaption>
+      </figure>
+    );
+  }
+
+  const scale = niceScale(stats.min ?? 0, stats.max ?? 1, {
+    integer: decimals === 0,
+  });
+
+  return (
+    <figure className="space-y-1">
+      <figcaption className="space-y-0.5">
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          <Gauge className="h-3.5 w-3.5 text-primary" />
+          {fieldLabel(field)}
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          Bucket mean · range{" "}
+          <span className="font-mono">
+            {format(stats.min as number)}–{format(stats.max as number)}
+          </span>
+          {field.unit ? ` ${field.unit}` : ""} · latest{" "}
+          <span className="font-mono">{format(stats.last as number)}</span>
+          {stats.count < timeline.total && (
+            <>
+              {" "}
+              · measured on{" "}
+              <span className="font-mono">{formatCount(stats.count)}</span> of{" "}
+              <span className="font-mono">{formatCount(timeline.total)}</span>{" "}
+              {schema.rowNounPlural} — the rest reported this sensor as not
+              read, which is excluded rather than charted as 0
+            </>
+          )}
+        </p>
+      </figcaption>
+      <LineChart
+        timeline={timeline}
+        values={timeline.buckets.map((b) => b.series[field.key]?.mean ?? null)}
+        band={timeline.buckets.map((b) => {
+          const bucket = b.series[field.key];
+          return bucket && bucket.min !== null && bucket.max !== null
+            ? ([bucket.min, bucket.max] as [number, number])
+            : null;
+        })}
+        scale={scale}
+        formatValue={format}
+        valueName={field.unit ?? ""}
+        noun={schema.rowNoun}
       />
     </figure>
   );
@@ -708,6 +952,8 @@ interface LineChartProps {
   reference?: number | null;
   formatValue: (value: number) => string;
   valueName: string;
+  /** What one row of the active dataset is, for the tooltip count. */
+  noun?: string;
 }
 
 function LineChart({
@@ -718,6 +964,7 @@ function LineChart({
   reference,
   formatValue,
   valueName,
+  noun = "payload",
 }: LineChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const width = useElementWidth(containerRef, 360);
@@ -998,7 +1245,7 @@ function LineChart({
             </p>
           )}
           <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
-            {formatCount(bucket.count)} payload(s) in this{" "}
+            {formatCount(bucket.count)} {noun}(s) in this{" "}
             {formatDuration(timeline.bucketMs)}
           </p>
         </div>
@@ -1009,18 +1256,36 @@ function LineChart({
 
 /* --------------------------------------------------------------- table twin */
 
-function ValuesTable({ timeline }: { timeline: Timeline }) {
+function ValuesTable({
+  timeline,
+  schema,
+  series,
+}: ChartProps & { series: PayloadFieldDef[] }) {
+  // The byte columns only exist where the dataset stores the raw frame.
+  const showBytes = schema.capabilities.byteSizeChart;
+
   return (
     <div className="max-h-72 overflow-y-auto rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
             <TableHead>Bucket start</TableHead>
-            <TableHead className="text-right">Payloads</TableHead>
-            <TableHead className="text-right">Min bytes</TableHead>
-            <TableHead className="text-right">Mean bytes</TableHead>
-            <TableHead className="text-right">Max bytes</TableHead>
+            <TableHead className="text-right capitalize">
+              {schema.rowNounPlural}
+            </TableHead>
+            {showBytes && (
+              <>
+                <TableHead className="text-right">Min bytes</TableHead>
+                <TableHead className="text-right">Mean bytes</TableHead>
+                <TableHead className="text-right">Max bytes</TableHead>
+              </>
+            )}
             <TableHead className="text-right">Counter (last)</TableHead>
+            {series.map((field) => (
+              <TableHead key={field.key} className="text-right">
+                {fieldLabel(field)}
+              </TableHead>
+            ))}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -1032,22 +1297,37 @@ function ValuesTable({ timeline }: { timeline: Timeline }) {
               <TableCell className="text-right font-mono">
                 {bucket.count}
               </TableCell>
-              <TableCell className="text-right font-mono">
-                {bucket.minBytes ?? "—"}
-              </TableCell>
-              <TableCell className="text-right font-mono">
-                {bucket.meanBytes === null
-                  ? "—"
-                  : Number.isInteger(bucket.meanBytes)
-                    ? bucket.meanBytes
-                    : bucket.meanBytes.toFixed(1)}
-              </TableCell>
-              <TableCell className="text-right font-mono">
-                {bucket.maxBytes ?? "—"}
-              </TableCell>
+              {showBytes && (
+                <>
+                  <TableCell className="text-right font-mono">
+                    {bucket.minBytes ?? "—"}
+                  </TableCell>
+                  <TableCell className="text-right font-mono">
+                    {bucket.meanBytes === null
+                      ? "—"
+                      : Number.isInteger(bucket.meanBytes)
+                        ? bucket.meanBytes
+                        : bucket.meanBytes.toFixed(1)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono">
+                    {bucket.maxBytes ?? "—"}
+                  </TableCell>
+                </>
+              )}
               <TableCell className="text-right font-mono">
                 {bucket.lastCounter ?? "—"}
               </TableCell>
+              {series.map((field) => {
+                const mean = bucket.series[field.key]?.mean ?? null;
+                return (
+                  <TableCell
+                    key={field.key}
+                    className="text-right font-mono"
+                  >
+                    {mean === null ? "—" : mean.toFixed(field.decimals ?? 0)}
+                  </TableCell>
+                );
+              })}
             </TableRow>
           ))}
         </TableBody>

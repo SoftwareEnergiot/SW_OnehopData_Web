@@ -4,6 +4,11 @@ import {
   NO_DEVICE_UID,
   parseDeviceUidFilter,
 } from "@/lib/payload-filters";
+import {
+  ENVIRONMENT_PARAM,
+  INGEST_DEFAULT_ENVIRONMENT,
+} from "@/lib/environments";
+import { resolveEnvironment } from "@/lib/payload-repository";
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -14,47 +19,32 @@ const CHUNK = 1000;
 // Hard ceiling so an unbounded range can never stream an unbounded response.
 const MAX_POINTS = 20000;
 
-// The columns the charts plot. Kept narrow on purpose: the whole range ships in
-// one response, so every extra column is paid for on every payload. The battery
-// and radio columns are generated from `context` by scripts/004 — a database
-// without that migration simply has no such columns, which is handled below.
-// Progressively smaller column sets, richest first. Each generated-column
-// migration adds a tier, and the query walks down the list until the database
-// accepts one — so a database missing scripts/005 still charts everything
-// scripts/004 provides, instead of falling all the way back to reception only.
-//
-// error_mask belongs to the original schema, so it is in every tier: the battery
-// series needs it to tell a flat battery from a failed fuel gauge.
-const BASE_COLUMNS = "created_at,byte_length,reporting_counter,error_mask";
-const COLUMN_TIERS = [
-  // scripts/005: the reporting-loss counters.
-  BASE_COLUMNS +
-    ",battery_soc,battery_voltage,rsrp,snr,reporting_lost_counter,tx_failed",
-  // scripts/004: battery and radio diagnostics.
-  BASE_COLUMNS + ",battery_soc,battery_voltage,rsrp,snr",
-  // Original schema only.
-  BASE_COLUMNS,
-];
-
 /**
- * GET /api/payloads/summary
+ * GET /api/payloads/summary[?environment=<name>]
  *
- * Returns the series the dashboard charts need — reception time, byte size,
- * reporting counter, and the V1 battery / radio diagnostics — for *every*
- * payload in the range, not just the page the table shows. Only those columns
- * are selected, so the whole range stays cheap to ship.
+ * Returns the series the dashboard charts need for *every* payload in the
+ * range, not just the page the table shows. Which columns those are comes from
+ * the active environment's schema (lib/payload-schemas), so the response is
+ * always narrow: the whole range ships in one response and every extra column
+ * is paid for on every payload.
  *
- * The diagnostic columns are null for V0 payloads, which carry no such fields.
- * If scripts/004 has not been run the columns do not exist at all; the query is
- * then retried with the base columns so the reception charts keep working and
- * only the battery / coverage charts go missing.
+ * Development asks for reception time, byte size, reporting counter, the error
+ * mask and the V1 battery / radio diagnostics. The diagnostic columns are
+ * generated from `context` by scripts/004 and scripts/005; a database missing
+ * one of those migrations does not have them at all, so the schema lists
+ * progressively smaller column sets and the query walks down until one is
+ * accepted — a database missing only the newest migration keeps every chart it
+ * can still serve.
+ *
+ * REE asks for reception time, the reporting counter, the valid-sample mask and
+ * the sensor channels, which is everything `payloads_REE` can chart.
  *
  * Query: `from` / `to` (optional, inclusive bounds on `created_at`), and
  * `device_uid` (optional; same rules as GET /api/payloads). Charting one device
- * at a time matters here: battery and coverage lines from several devices
- * interleaved into one series would be meaningless.
- * Response:
- * `{ success, points: [{ created_at, byte_length, reporting_counter, battery_soc?, battery_voltage?, rsrp?, snr? }], total, truncated }`
+ * at a time matters here: lines from several devices interleaved into one
+ * series would be meaningless.
+ *
+ * Response: `{ success, environment, table, columns, points, total, truncated }`
  * ordered oldest first. `truncated` is true when the range holds more than
  * MAX_POINTS payloads and the response was cut short.
  */
@@ -63,7 +53,28 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const from = searchParams.get("from");
     const to = searchParams.get("to");
-    const deviceFilter = parseDeviceUidFilter(searchParams.get("device_uid"));
+
+    const resolution = resolveEnvironment(
+      searchParams.get(ENVIRONMENT_PARAM) ?? INGEST_DEFAULT_ENVIRONMENT,
+    );
+    if (!resolution.ok) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: resolution.error.error,
+          details: resolution.error.details,
+        },
+        { status: resolution.error.status },
+      );
+    }
+    const { environment, table, schema } = resolution.value;
+    const supabase = await createClient();
+    const columnTiers = schema.summaryColumnTiers;
+
+    const deviceFilter = parseDeviceUidFilter(
+      searchParams.get("device_uid"),
+      schema.deviceUidFormat,
+    );
 
     if (deviceFilter.kind === "invalid") {
       return NextResponse.json(
@@ -81,51 +92,42 @@ export async function GET(request: NextRequest) {
     const toDate = to ? new Date(to) : null;
     const hasTo = toDate && !Number.isNaN(toDate.getTime());
 
-    const supabase = await createClient();
-
-    const points: {
-      created_at: string;
-      byte_length: number;
-      reporting_counter: number;
-      error_mask?: number | null;
-      battery_soc?: number | null;
-      battery_voltage?: number | null;
-      rsrp?: number | null;
-      snr?: number | null;
-      reporting_lost_counter?: number | null;
-      tx_failed?: number | null;
-    }[] = [];
+    const points: Record<string, unknown>[] = [];
     let truncated = false;
-    // Index into COLUMN_TIERS. Steps down once the database tells us a tier
-    // names a column it does not have, and stays there for the rest of the
-    // paging loop so the downgrade is probed once, not per chunk.
+    // Index into the schema's column tiers. Steps down once the database tells
+    // us a tier names a column it does not have, and stays there for the rest
+    // of the paging loop so the downgrade is probed once, not per chunk.
     let tier = 0;
 
     for (let offset = 0; offset < MAX_POINTS; offset += CHUNK) {
       const runQuery = async (select: string) => {
         let query = supabase
-          .from("payloads")
+          .from(table)
           .select(select)
-          .order("created_at", { ascending: true })
+          .order(schema.receivedKey, { ascending: true })
           .range(offset, offset + CHUNK - 1);
 
-        if (hasFrom) query = query.gte("created_at", fromDate.toISOString());
-        if (hasTo) query = query.lte("created_at", toDate.toISOString());
+        if (hasFrom) {
+          query = query.gte(schema.receivedKey, fromDate.toISOString());
+        }
+        if (hasTo) query = query.lte(schema.receivedKey, toDate.toISOString());
 
-        return applyDeviceUidFilter(query, deviceFilter);
+        return schema.deviceKey
+          ? applyDeviceUidFilter(query, deviceFilter, schema.deviceKey)
+          : query;
       };
 
-      let { data, error } = await runQuery(COLUMN_TIERS[tier]);
+      let { data, error } = await runQuery(columnTiers[tier]);
 
       // PostgREST reports an unknown column as 42703. Step down one tier at a
       // time rather than dropping straight to the base columns, so a database
       // missing only the newest migration keeps the charts it can still serve.
-      while (error && error.code === "42703" && tier < COLUMN_TIERS.length - 1) {
+      while (error && error.code === "42703" && tier < columnTiers.length - 1) {
         tier += 1;
         console.warn(
-          `Payload summary: a diagnostic column is missing (run the migrations in scripts/); retrying with tier ${tier}.`,
+          `Payload summary (${table}): a column is missing (run the migrations in scripts/); retrying with tier ${tier}.`,
         );
-        ({ data, error } = await runQuery(COLUMN_TIERS[tier]));
+        ({ data, error } = await runQuery(columnTiers[tier]));
       }
 
       if (error) {
@@ -150,6 +152,9 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      environment,
+      table,
+      columns: columnTiers[tier].split(","),
       points,
       total: points.length,
       truncated,
