@@ -233,11 +233,12 @@ scaling factor, unit):
 `POST /api/payloads` takes one optional query parameter, `environment`.
 
 **Devices never send it.** Without it the endpoint picks the table from the
-payload: the decoded device UID is compared against the UID already stored in
-`payloads_REE`, and a match stores the report there (one row per sample).
-Anything else — a different device, a V0 payload with no UID, or an
-empty/unreadable REE table — is stored in `public.payloads`, exactly as before,
-and the answer is still a bare `204` with a best-effort write.
+payload: a decoded device UID listed in the REE schema's `writeDeviceUids`
+(`lib/payload-schemas.ts`, today `00124B0038A83D90`) stores the report in
+`payloads_REE` (one row per sample). Anything else — a different device, or a
+V0 payload with no UID — is stored in `public.payloads`, exactly as before, and
+the answer is still a bare `204` with a best-effort write. The routing reads no
+table, so it works while `payloads_REE` is still empty.
 
 **The dashboard does send it.** `?environment=REE` or `?environment=Development`
 is honoured as given, with no UID-based rerouting, and the answer is JSON so the

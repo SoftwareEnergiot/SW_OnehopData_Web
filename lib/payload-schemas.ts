@@ -107,8 +107,9 @@ export interface PayloadSchema {
   capabilities: PayloadSchemaCapabilities;
   /**
    * Device UIDs the database accepts on insert, when it restricts them. Shown
-   * to the user where the UI writes rows; never used to filter reads, and never
-   * used to rewrite a UID the user typed.
+   * to the user where the UI writes rows, and used by the ingestion endpoint to
+   * route a device's unaddressed payload to this table. Never used to filter
+   * reads, and never used to rewrite a UID the user typed.
    */
   writeDeviceUids?: string[];
 }
@@ -305,7 +306,9 @@ export const REE_SCHEMA: PayloadSchema = {
     writable: true,
   },
   // Enforced by the database, not by the frontend: an insert with any other UID
-  // is rejected and the rejection is surfaced as-is.
+  // is rejected and the rejection is surfaced as-is. Also the list the ingestion
+  // endpoint routes device payloads to REE by — keep it in step with the
+  // database restriction.
   writeDeviceUids: ["00124B0038A83D90"],
 };
 

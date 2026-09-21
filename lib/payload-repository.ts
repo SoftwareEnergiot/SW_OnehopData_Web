@@ -137,64 +137,32 @@ export function canonicalUid(uid: string | null | undefined): string | null {
 }
 
 /**
- * The device UID `payloads_REE` already holds, read from one existing row.
- *
- * The REE table is written by a single device, and which one is a property of
- * the data rather than of this code — so the reference UID is read back from
- * the table instead of being hard-coded. One row is enough; the query is
- * ordered by primary key so repeated calls agree on which row that is.
- *
- * Returns null when the table is empty or cannot be read, which means an
- * incoming payload has nothing to match against.
- */
-export async function reeReferenceDeviceUid(
-  supabase: Client,
-): Promise<string | null> {
-  const schema = PAYLOAD_SCHEMAS.ree;
-  if (!schema.deviceKey) return null;
-
-  const { data, error } = await supabase
-    .from(schema.table)
-    .select(schema.deviceKey)
-    .order(schema.primaryKey, { ascending: true })
-    .limit(1);
-
-  if (error) {
-    console.warn(
-      `Could not read a reference device UID from ${schema.table}: ${error.message}`,
-    );
-    return null;
-  }
-
-  const row = (data ?? [])[0] as unknown as
-    | Record<string, string | null>
-    | undefined;
-  return canonicalUid(row?.[schema.deviceKey]);
-}
-
-/**
  * Which environment an *unaddressed* incoming payload belongs to.
  *
  * Devices POST to the ingestion endpoint without naming an environment, so the
- * endpoint decides from the payload itself: the decoded device UID is compared
- * against the UID already stored in `payloads_REE`, and a match routes the
- * payload there. Anything else — a different device, a payload with no UID at
- * all (V0), or an empty/unreadable REE table — goes to `public.payloads`, which
- * is where every payload has always landed.
+ * endpoint decides from the payload itself: a decoded device UID listed in the
+ * REE schema's `writeDeviceUids` routes the payload to `payloads_REE`. Anything
+ * else — a different device, or a payload with no UID at all (V0) — goes to
+ * `public.payloads`, which is where every payload has always landed.
+ *
+ * The list is fixed in code on purpose. Reading the reference UID back from
+ * `payloads_REE` made routing depend on the table it is meant to fill: while it
+ * was empty (or hidden from the anon role) nothing could ever match, so every
+ * report of the REE device went to Development and the table never got its
+ * first row.
  *
  * This never applies to a request that names an environment explicitly: an
  * explicit choice is the caller's, and a write it rejects must be reported
  * rather than redirected to another table.
  */
-export async function environmentForDeviceUid(
-  supabase: Client,
-  deviceUid: string | null,
-): Promise<string> {
+export function environmentForDeviceUid(deviceUid: string | null): string {
   const incoming = canonicalUid(deviceUid);
   if (!incoming) return INGEST_DEFAULT_ENVIRONMENT;
 
-  const reference = await reeReferenceDeviceUid(supabase);
-  if (reference && reference === incoming) return REE_ENVIRONMENT;
+  const reeDevices = PAYLOAD_SCHEMAS.ree.writeDeviceUids ?? [];
+  if (reeDevices.some((uid) => canonicalUid(uid) === incoming)) {
+    return REE_ENVIRONMENT;
+  }
 
   return INGEST_DEFAULT_ENVIRONMENT;
 }
