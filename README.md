@@ -74,19 +74,27 @@ either environment.
 | List, paging, time range, device filter, refresh | yes | yes |
 | CSV export | yes | yes, REE columns |
 | Reception-frequency and frame-counter charts | yes | yes |
-| Detail inspector | binary-vs-hex + field-by-field decode of the stored frame | field-by-field from the stored columns, with units and the valid-sample mask |
+| Detail inspector | binary-vs-hex + field-by-field decode of the stored frame | field-by-field from the stored columns: sensors, batch context, error mask and valid-sample mask |
 | Payload-size chart | yes | no — `payloads_REE` has no `byte_length` |
-| Battery / coverage charts | yes | no — `payloads_REE` has no batch context |
+| Battery / coverage charts | yes | yes |
 | Sensor-channel charts (temperature, humidity, luminosity, acceleration, magnetic field) | — (each series already has its own chart) | yes, pick any of the 14 channels |
-| Error-mask decoding | yes | **no source** — see below |
+| Error-mask decoding | yes | yes |
 | Writes from the Playground | yes | yes, one row per sample |
 
-**REE carries no error mask.** `payloads_REE` has no error column, and no other
-table, endpoint or joined structure in this project holds one for it. Nothing
-was invented to fill the gap: the REE inspector says so in place of the error
-card, and the catalog lookup is untouched and still decodes any mask it is
-given. If REE error display is wanted, the device would have to store the
-report's `error_mask` alongside the samples.
+**REE stores the batch context one column per field.** The 17 V1 context
+fields (`error_mask`, `last_communication_error`, `battery_soc`,
+`battery_voltage`, `config_crc32`, `boot_count`, `reset_source`, `rsrp`, `snr`,
+`status_flags`, `tau`, `active_time`, `last_attach_duration_ms`,
+`last_tx_duration_ms`, `reporting_lost_counter`, `tx_failed`,
+`last_poll_status`) each have a `payloads_REE` column of the same name, holding
+the raw value. The REE devices' V1 format is frozen, so the columns are fixed.
+Rows stored before the columns were added have them all `NULL`: those values
+were never kept, and the raw frame is not stored. With `status_flags` present,
+the inspector also says whether `sample_time` is UTC or uptime.
+
+> **The columns must exist before the code that writes them is deployed.** The
+> REE insert names every context column, so against a table without them every
+> device report is rejected and lost (the device still gets `204`).
 
 ---
 

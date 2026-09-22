@@ -36,8 +36,9 @@ const MAX_POINTS = 20000;
  * accepted — a database missing only the newest migration keeps every chart it
  * can still serve.
  *
- * REE asks for reception time, the reporting counter, the valid-sample mask and
- * the sensor channels, which is everything `payloads_REE` can chart.
+ * REE asks for reception time, the reporting counter, the valid-sample mask,
+ * the sensor channels and the battery / radio / reporting-loss context columns.
+ * A table without the context columns falls back to the sensors alone.
  *
  * Query: `from` / `to` (optional, inclusive bounds on `created_at`), and
  * `device_uid` (optional; same rules as GET /api/payloads). Charting one device

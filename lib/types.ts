@@ -50,10 +50,11 @@ export interface PayloadListResponse {
 // (204 accepted, 4xx decode failure, 500 unexpected error).
 
 // A stored REE sample row, as returned by the API / Supabase. One row is one
-// already-decoded sample — `payloads_REE` holds no raw frame and no batch
-// context, so there is no payload_hex, no byte_length and no error mask here.
-// Every sensor column is nullable; a reading whose `valid_sample_mask` bit is
-// clear was transmitted as 0 and must be discarded (see isReadingValid).
+// already-decoded sample — `payloads_REE` holds no raw frame, so there is no
+// payload_hex and no byte_length here. The report's batch context is stored
+// one column per field; those columns are null on rows stored before they were
+// added. Every sensor column is nullable; a reading whose `valid_sample_mask`
+// bit is clear was transmitted as 0 and must be discarded (see isReadingValid).
 export interface ReePayloadRecord {
   id: number;
   created_at: string;
@@ -77,6 +78,26 @@ export interface ReePayloadRecord {
   magnetic_field_1: number | null;
   magnetic_field_2: number | null;
   valid_sample_mask: number | null;
+  // V1 batch context, one column per field.
+  error_mask: number | null;
+  last_communication_error: number | null;
+  battery_soc: number | null;
+  battery_voltage: number | null;
+  config_crc32: number | null;
+  boot_count: number | null;
+  reset_source: number | null;
+  /** RSRP in dBm; 0 means "not available". */
+  rsrp: number | null;
+  /** SNR in dB; 0 means "not available". */
+  snr: number | null;
+  status_flags: number | null;
+  tau: number | null;
+  active_time: number | null;
+  last_attach_duration_ms: number | null;
+  last_tx_duration_ms: number | null;
+  reporting_lost_counter: number | null;
+  tx_failed: number | null;
+  last_poll_status: number | null;
 }
 
 // Either environment's row shape. Schema-driven views read columns by key, so
