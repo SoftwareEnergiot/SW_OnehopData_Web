@@ -272,8 +272,8 @@ export async function GET(request: NextRequest) {
       .order(schema.receivedKey, { ascending: false })
       .range(offset, offset + limit - 1);
 
-    // Only Development stores an error mask; REE rows carry no such column, so
-    // the filter is not offered there rather than being applied to nothing.
+    // Only a dataset that stores an error mask is filtered on one, rather than
+    // the filter being applied to a column that is not there.
     if (
       schema.capabilities.errorMask &&
       errorMask !== null &&

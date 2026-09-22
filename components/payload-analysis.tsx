@@ -14,7 +14,6 @@ import { BinaryHexView } from "@/components/binary-hex-view";
 import {
   layoutOf,
   sampleInstant,
-  type ContextFieldDef,
   type DecodedPayload,
   type DecodedSample,
   type PayloadAnalysis,
@@ -54,9 +53,10 @@ function scaledValue(raw: number, factor: number): string {
 
 // Human-readable gloss for the context fields whose numeric value encodes
 // something (an enum, a bitmask, a hex register). Returns null for the plain
-// numbers, which are shown as-is.
-function describeContextValue(
-  field: ContextFieldDef,
+// numbers, which are shown as-is. Shared with the REE inspector, whose table
+// stores the same fields one column each.
+export function describeContextValue(
+  key: string,
   value: number,
   // Needed to tell a flat battery from a failed fuel gauge, which the spec
   // distinguishes by a bit in the error mask of the same report.
@@ -65,7 +65,7 @@ function describeContextValue(
   hasSampleTime: boolean,
 ): string | null {
   const batterySocValid = isBatterySocValid(value, errorMask);
-  switch (field.key) {
+  switch (key) {
     case "error_mask":
       return formatErrorMask(value);
     case "last_communication_error":
@@ -372,7 +372,7 @@ function ContextSection({ analysis }: PayloadAnalysisViewProps) {
             {fields.map((field) => {
               const value = decoded.context[field.key] ?? 0;
               const gloss = describeContextValue(
-                field,
+                field.key,
                 value,
                 decoded.error_mask,
                 layout.hasSampleTime,
@@ -443,17 +443,18 @@ function ContextSection({ analysis }: PayloadAnalysisViewProps) {
  * `bit_value` — an entry is active when `(mask & bit_value) !== 0` — so a
  * combined mask expands to every flag it sets. A mask of 0 is ERR_RSN_NONE
  * alone, and ERR_RSN_NONE never appears next to a real error.
+ *
+ * Shared with the REE inspector, whose table stores the mask as a column.
  */
-function ErrorSection({ analysis }: PayloadAnalysisViewProps) {
-  const { decoded } = analysis;
+export function ErrorMaskCard({ mask }: { mask: number }) {
   const { codes, source } = useErrorCatalog();
-  const errors = decodeErrorMask(decoded.error_mask, codes);
+  const errors = decodeErrorMask(mask, codes);
 
   return (
     <Card>
       <CardHeader className="flex-row items-center gap-2 space-y-0">
         <TriangleAlert className="h-4 w-4 text-primary" />
-        <CardTitle>Error mask ({formatErrorMask(decoded.error_mask)})</CardTitle>
+        <CardTitle>Error mask ({formatErrorMask(mask)})</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex flex-wrap gap-2">
@@ -543,7 +544,7 @@ export function PayloadAnalysisView({ analysis }: PayloadAnalysisViewProps) {
       <SamplesSection analysis={analysis} />
       <ValidMaskSection analysis={analysis} />
       <ContextSection analysis={analysis} />
-      <ErrorSection analysis={analysis} />
+      <ErrorMaskCard mask={analysis.decoded.error_mask} />
     </div>
   );
 }

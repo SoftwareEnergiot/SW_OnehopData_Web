@@ -17,6 +17,7 @@ import {
   schemaForEnvironment,
 } from "@/lib/payload-schemas";
 import { parseDeviceUidFilter } from "@/lib/payload-filters";
+import { V1_CONTEXT_FIELDS } from "@/lib/payload-decoder";
 import type { ReePayloadRecord } from "@/lib/types";
 
 describe("environment -> payload table", () => {
@@ -59,14 +60,26 @@ describe("schema selection", () => {
   });
 
   it("only offers a feature the dataset can actually support", () => {
-    // payloads_REE has no raw frame, no byte length and no error mask.
+    // payloads_REE has no raw frame and no byte length...
     expect(REE_SCHEMA.capabilities.rawPayloadInspector).toBe(false);
     expect(REE_SCHEMA.capabilities.byteSizeChart).toBe(false);
-    expect(REE_SCHEMA.capabilities.errorMask).toBe(false);
-    expect(REE_SCHEMA.capabilities.diagnosticsCharts).toBe(false);
-    // ...and payloads has all of them.
+    // ...but stores the batch context, error mask included, one column each.
+    expect(REE_SCHEMA.capabilities.errorMask).toBe(true);
+    expect(REE_SCHEMA.capabilities.diagnosticsCharts).toBe(true);
+    // payloads has all of them.
     expect(DEVELOPMENT_SCHEMA.capabilities.rawPayloadInspector).toBe(true);
     expect(DEVELOPMENT_SCHEMA.capabilities.errorMask).toBe(true);
+  });
+
+  it("declares a REE column for every V1 context field", () => {
+    for (const { key, type } of V1_CONTEXT_FIELDS) {
+      const field = fieldOf(REE_SCHEMA, key);
+      expect(field, key).toBeDefined();
+      expect(field!.group).toBe("Context");
+      expect(field!.protocolType).toBe(type);
+    }
+    expect(fieldOf(REE_SCHEMA, "error_mask")!.kind).toBe("errorMask");
+    expect(fieldOf(REE_SCHEMA, "last_tx_duration_ms")!.unit).toBe("ms");
   });
 
   it("describes every REE column with a label, and a unit where it has one", () => {
@@ -103,9 +116,23 @@ describe("schema selection", () => {
   });
 
   it("selects every summary column from columns the REE table has", () => {
-    const columns = REE_SCHEMA.summaryColumnTiers[0].split(",");
     const known = new Set(REE_SCHEMA.fields.map((field) => field.key));
-    for (const column of columns) expect(known.has(column), column).toBe(true);
+    for (const tier of REE_SCHEMA.summaryColumnTiers) {
+      for (const column of tier.split(",")) {
+        expect(known.has(column), column).toBe(true);
+      }
+    }
+  });
+
+  it("charts REE diagnostics, and falls back to the sensors without them", () => {
+    const [full, fallback] = REE_SCHEMA.summaryColumnTiers.map((tier) =>
+      tier.split(","),
+    );
+    for (const column of ["battery_soc", "rsrp", "snr", "error_mask"]) {
+      expect(full).toContain(column);
+      expect(fallback).not.toContain(column);
+    }
+    expect(fallback).toContain("ambient_temperature");
   });
 });
 

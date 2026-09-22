@@ -23,9 +23,10 @@ export function isNumericField(field: PayloadFieldDef): boolean {
 /**
  * A sample time as the two things it could be.
  *
- * The protocol decides between them with status-flags bit 5, and
- * `payloads_REE` carries no status-flags column — so rather than pick one and
- * present a guess as a fact, both readings are offered and labelled.
+ * The protocol decides between them with status-flags bit 5. Rows stored
+ * before `payloads_REE` had a status-flags column cannot tell, so rather than
+ * pick one and present a guess as a fact, both readings are offered and
+ * labelled, and the inspector marks the one that applies when it can.
  */
 export function describeSampleTime(seconds: number): {
   utc: string;

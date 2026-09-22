@@ -2,6 +2,7 @@
 // expects. Kept out of the route so both shapes can be unit-tested directly.
 
 import {
+  V1_CONTEXT_FIELDS,
   V1_SAMPLE_FIELDS,
   type PayloadAnalysis,
 } from "@/lib/payload-decoder";
@@ -79,15 +80,21 @@ const REE_COLUMN_FOR_CHANNEL: Record<string, string> = {
   valid_sample_mask: "valid_sample_mask",
 };
 
+/**
+ * V1 context fields, each stored in the `payloads_REE` column of the same name.
+ * Read from the decoder's own field table, so the two cannot drift.
+ */
+export const REE_CONTEXT_COLUMNS: string[] = V1_CONTEXT_FIELDS.map((f) => f.key);
+
 /** The 16 hex digits of a UID, uppercase and unseparated — REE's stored form. */
 function plainUid(uid: string): string {
   return uid.replace(/[^0-9A-Fa-f]/g, "").toUpperCase();
 }
 
 /**
- * `payloads_REE` stores one *decoded sample* per row: no raw frame, no batch
- * context, no error mask. A report of N samples becomes N rows sharing the
- * report's header fields.
+ * `payloads_REE` stores one *decoded sample* per row, no raw frame. A report of
+ * N samples becomes N rows sharing the report's header and context fields, each
+ * context field in its own column (the V1 format of the REE devices is frozen).
  *
  * Only the current V1 revision maps: V0 carries neither a device UID nor these
  * channels, and the earlier V1 revisions carry no per-sample time, which
@@ -127,6 +134,10 @@ function reeRows(analysis: PayloadAnalysis): Record<string, unknown>[] {
       // values, not the raw counts the wire carries. The integer columns have a
       // factor of 1 and pass through untouched.
       row[column] = factor === 1 ? raw : raw / factor;
+    }
+
+    for (const column of REE_CONTEXT_COLUMNS) {
+      row[column] = decoded.context[column];
     }
 
     return row;

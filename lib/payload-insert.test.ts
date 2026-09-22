@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { analyzePayload, hexToBytes } from "@/lib/payload-decoder";
+import {
+  V1_CONTEXT_FIELDS,
+  analyzePayload,
+  hexToBytes,
+} from "@/lib/payload-decoder";
 import { PayloadInsertError, rowsForSchema } from "@/lib/payload-insert";
 import { DEVELOPMENT_SCHEMA, REE_SCHEMA } from "@/lib/payload-schemas";
 import { canonicalUid } from "@/lib/payload-repository";
@@ -82,12 +86,25 @@ describe("rowsForSchema — REE", () => {
     }
   });
 
-  it("never invents an error column for a table that has none", () => {
+  it("stores every V1 context field in its own column, raw", () => {
+    const analysis = analyse(V1_EXAMPLE_HEX);
+    const row = rowsForSchema(REE_SCHEMA, analysis, source)[0];
+
+    for (const { key } of V1_CONTEXT_FIELDS) {
+      expect(row[key], key).toBe(analysis.decoded.context[key]);
+    }
+    // Spot-check against the document's example values.
+    expect(row.error_mask).toBe(24);
+    expect(row.boot_count).toBe(12);
+    expect(row.rsrp).toBe(-95);
+    expect(row.last_tx_duration_ms).toBe(4500);
+    expect(row.last_poll_status).toBe(0);
+  });
+
+  it("never writes the resolved error list, only the mask", () => {
     const row = rowsForSchema(REE_SCHEMA, analyse(V1_EXAMPLE_HEX), source)[0];
-    expect(row).not.toHaveProperty("error_mask");
-    expect(row).not.toHaveProperty("error_code");
-    expect(row).not.toHaveProperty("error_reason");
     expect(row).not.toHaveProperty("errors");
+    expect(row).not.toHaveProperty("context");
   });
 
   it("refuses a V0 payload rather than writing a UID it does not have", () => {

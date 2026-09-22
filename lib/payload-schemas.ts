@@ -12,6 +12,7 @@
 // that, and reads the table name from here.
 
 import { CSV_COLUMNS, type CsvColumn } from "@/lib/payload-csv";
+import { V1_CONTEXT_FIELDS } from "@/lib/payload-decoder";
 import { ENVIRONMENT_CONFIG, configForEnvironment } from "@/lib/environments";
 import type { PayloadSchemaId } from "@/lib/payload-schemas.types";
 import type { PayloadRow, ReePayloadRecord } from "@/lib/types";
@@ -189,6 +190,40 @@ const REE_VALID_BIT = {
   internal: 8,
 } as const;
 
+// What each V1 context field means, for the detail view. The inspector adds a
+// value-specific reading on top (an enum name, the status flags spelled out…).
+const REE_CONTEXT_DESCRIPTIONS: Record<string, string> = {
+  error_mask: "Active device error flags.",
+  last_communication_error: "Result of the last transmission attempt.",
+  battery_soc: "Fuel gauge state of charge. Not clamped: a reading above 100 is sent as-is.",
+  battery_voltage: "Battery voltage.",
+  config_crc32: "CRC32 of the active configuration. Reserved: always 0 until remote configuration polling exists.",
+  boot_count: "Lifetime boot count, never cleared.",
+  reset_source: "MCU reset source of the last boot.",
+  rsrp: "Received signal power, previous transmission cycle. 0 means not available.",
+  snr: "Signal-to-noise ratio, previous transmission cycle. 0 means not available (or a genuine 0 dB).",
+  status_flags: "Modem and clock status. Bit 5 says whether sample_time is UTC.",
+  tau: "Periodic tracking area update timer granted by the network, previous cycle.",
+  active_time: "PSM active time granted by the network, previous cycle.",
+  last_attach_duration_ms: "Duration of the last network attach.",
+  last_tx_duration_ms: "Duration of the last transmission.",
+  reporting_lost_counter: "Reports lost since boot. Read as a delta between reports.",
+  tx_failed: "Failed transmissions since boot. Read as a delta between reports.",
+  last_poll_status: "Result of the last configuration poll. Reserved: always 0 for now.",
+};
+
+// The V1 context fields as REE columns, one per field, taken from the decoder's
+// own table so labels, types and units cannot drift from the protocol.
+const REE_CONTEXT_FIELDS: PayloadFieldDef[] = V1_CONTEXT_FIELDS.map((field) => ({
+  key: field.key,
+  label: field.label,
+  unit: field.unit || undefined,
+  kind: field.key === "error_mask" ? "errorMask" : "integer",
+  group: "Context",
+  protocolType: field.type,
+  description: REE_CONTEXT_DESCRIPTIONS[field.key],
+}));
+
 const REE_FIELDS: PayloadFieldDef[] = [
   // Database / report information.
   { key: "id", label: "Row ID", kind: "integer", group: "Report", description: "Database row ID." },
@@ -207,7 +242,7 @@ const REE_FIELDS: PayloadFieldDef[] = [
     group: "Sample",
     protocolType: "uint32",
     description:
-      "Sample timestamp. Depending on the device's clock status this is either UTC epoch seconds or seconds since boot. payloads_REE carries no status-flags column to choose between them, so both readings are shown rather than one being guessed at.",
+      "Sample timestamp: UTC epoch seconds when status_flags bit 5 is set, seconds since boot otherwise. Rows stored before the context columns existed have no status flags, so both readings are shown for them.",
   },
 
   // Temperature.
@@ -236,7 +271,16 @@ const REE_FIELDS: PayloadFieldDef[] = [
 
   // Validity.
   { key: "valid_sample_mask", label: "Valid Sample Mask", kind: "sampleMask", group: "Validity", description: "Bitmask indicating which sensor measurements were successfully acquired." },
+
+  // The report's batch context, one column per field.
+  ...REE_CONTEXT_FIELDS,
 ];
+
+// The context columns the diagnostics charts read: battery, coverage and the
+// reporting-loss counters, plus the error mask that tells a failed fuel gauge
+// from a flat battery.
+const REE_DIAGNOSTIC_COLUMNS =
+  "error_mask,battery_soc,battery_voltage,rsrp,snr,reporting_lost_counter,tx_failed";
 
 const REE_MEASUREMENT_KEYS = REE_FIELDS.filter((field) => field.chartable).map(
   (field) => field.key,
@@ -288,6 +332,15 @@ export const REE_SCHEMA: PayloadSchema = {
     "luminosity",
   ],
   summaryColumnTiers: [
+    // With the context columns.
+    [
+      "created_at",
+      "reporting_counter",
+      "valid_sample_mask",
+      ...REE_MEASUREMENT_KEYS,
+      REE_DIAGNOSTIC_COLUMNS,
+    ].join(","),
+    // A table without them still charts the sensor channels.
     [
       "created_at",
       "reporting_counter",
@@ -299,9 +352,9 @@ export const REE_SCHEMA: PayloadSchema = {
   csvBasename: "payloads-ree",
   capabilities: {
     rawPayloadInspector: false,
-    errorMask: false,
+    errorMask: true,
     byteSizeChart: false,
-    diagnosticsCharts: false,
+    diagnosticsCharts: true,
     deviceFilter: true,
     writable: true,
   },
