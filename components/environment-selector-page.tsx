@@ -84,7 +84,7 @@ export function EnvironmentSelectorPage() {
 
       <div className="flex flex-1 items-center justify-center px-4 py-10">
         <Card className="w-full max-w-md">
-          <CardContent className="space-y-6">
+          <CardContent className="space-y-4">
             <div className="space-y-1">
               <h1 className="text-lg font-semibold tracking-tight text-foreground">
                 Select Environment
@@ -95,92 +95,94 @@ export function EnvironmentSelectorPage() {
               </p>
             </div>
 
-            {loading && (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                Loading…
-              </p>
-            )}
-
-            {failed && (
-              <div className="space-y-3">
-                <p className="flex items-start gap-2 text-sm text-destructive">
-                  <TriangleAlert className="mt-0.5 size-4 shrink-0" />
-                  <span>
-                    Could not load the environments.
-                    {error ? (
-                      <span className="mt-1 block font-mono text-xs text-muted-foreground">
-                        {error}
-                      </span>
-                    ) : null}
-                  </span>
+            <div className="space-y-2">
+              {loading && (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  Loading…
                 </p>
-                <Button
-                  variant="outline"
-                  onClick={reload}
-                  className="w-full gap-2"
-                >
-                  <RefreshCw className="size-4" />
-                  Try again
-                </Button>
-              </div>
-            )}
+              )}
 
-            {empty && (
-              <div className="space-y-2 py-8 text-center">
-                <p className="text-sm text-muted-foreground">
-                  No environments available.
-                </p>
-                {/* The application does not invent a list, so an empty table
-                    and a table the anon role cannot read look the same from
-                    here. Naming both saves a debugging session. */}
-                <p className="text-xs text-muted-foreground">
-                  <span className="font-mono">public.environment</span>{" "}
-                  returned no rows. If it does hold rows, the anon role has no
-                  read access to it yet — run{" "}
-                  <span className="font-mono">
-                    scripts/006_environment_and_ree_access.sql
-                  </span>
-                  .
-                </p>
-              </div>
-            )}
-
-            {status === 'ready' && environments.length > 0 && (
-              <>
-                <EnvironmentSelector
-                  environments={environments}
-                  value={draft}
-                  onChange={setDraft}
-                />
-
-                {draft && !draft.supported && (
-                  <p className="flex items-start gap-2 text-xs text-destructive">
-                    <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
-                    This application has no payload data source mapped for
-                    <span className="font-mono">{draft.name}</span>, so it
-                    cannot be entered.
+              {failed && (
+                <div className="space-y-3">
+                  <p className="flex items-start gap-2 text-sm text-destructive">
+                    <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+                    <span>
+                      Could not load the environments.
+                      {error ? (
+                        <span className="mt-1 block font-mono text-xs text-muted-foreground">
+                          {error}
+                        </span>
+                      ) : null}
+                    </span>
                   </p>
-                )}
+                  <Button
+                    variant="outline"
+                    onClick={reload}
+                    className="w-full gap-2"
+                  >
+                    <RefreshCw className="size-4" />
+                    Try again
+                  </Button>
+                </div>
+              )}
 
-                <Button
-                  onClick={handleContinue}
-                  disabled={!draft || !draft.supported}
-                  className="w-full gap-2"
-                >
-                  Continue
-                  <ArrowRight className="size-4" />
-                </Button>
-              </>
-            )}
+              {empty && (
+                <div className="space-y-2 py-8 text-center">
+                  <p className="text-sm text-muted-foreground">
+                    No environments available.
+                  </p>
+                  {/* The application does not invent a list, so an empty table
+                      and a table the anon role cannot read look the same from
+                      here. Naming both saves a debugging session. */}
+                  <p className="text-xs text-muted-foreground">
+                    <span className="font-mono">public.environment</span>{" "}
+                    returned no rows. If it does hold rows, the anon role has no
+                    read access to it yet — run{" "}
+                    <span className="font-mono">
+                      scripts/006_environment_and_ree_access.sql
+                    </span>
+                    .
+                  </p>
+                </div>
+              )}
 
-            <Button
-              variant="ghost"
-              onClick={handleSignOut}
-              className="w-full gap-2 text-muted-foreground"
-            >
-              <LogOut className="size-4" />
-              Sign out
-            </Button>
+              {status === 'ready' && environments.length > 0 && (
+                <>
+                  <EnvironmentSelector
+                    environments={environments}
+                    value={draft}
+                    onChange={setDraft}
+                  />
+
+                  {draft && !draft.supported && (
+                    <p className="flex items-start gap-2 text-xs text-destructive">
+                      <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+                      This application has no payload data source mapped for
+                      <span className="font-mono">{draft.name}</span>, so it
+                      cannot be entered.
+                    </p>
+                  )}
+
+                  <Button
+                    onClick={handleContinue}
+                    disabled={!draft || !draft.supported}
+                    className="w-full gap-2"
+                  >
+                    Continue
+                    <ArrowRight className="size-4" />
+                  </Button>
+                </>
+              )}
+
+              <Button
+                variant="ghost"
+                onClick={handleSignOut}
+                className="w-full gap-2 text-muted-foreground"
+              >
+                <LogOut className="size-4" />
+                Sign out
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>
