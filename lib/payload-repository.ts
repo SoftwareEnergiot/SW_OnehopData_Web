@@ -166,3 +166,180 @@ export function environmentForDeviceUid(deviceUid: string | null): string {
 
   return INGEST_DEFAULT_ENVIRONMENT;
 }
+
+/* ------------------------------------------------------------ device listing */
+
+// PostgREST caps a single request; walk the rows in chunks.
+const DEVICE_SCAN_CHUNK = 1000;
+// Hard ceiling on rows scanned, so a large table can never make a device list
+// slow. Devices only seen before the most recent rows are missing from the
+// list, which the result says via `truncated`.
+const DEVICE_SCAN_MAX_ROWS = 20000;
+
+export interface DeviceSummary {
+  /** The UID as the environment's table stores it. */
+  device_uid: string;
+  /** Rows from this device within the scanned rows. */
+  payloads: number;
+  /** Most recent reception, ISO 8601. */
+  last_seen: string;
+}
+
+export interface DeviceScan {
+  /** Most recently seen first. */
+  devices: DeviceSummary[];
+  /** At least one scanned row has no UID (V0). */
+  withoutUid: boolean;
+  truncated: boolean;
+}
+
+/**
+ * The distinct device UIDs that have sent payloads to an environment's table.
+ *
+ * There is no DISTINCT over the REST API without adding a database function, so
+ * this scans only the device and timestamp columns, newest first, and folds
+ * them. Throws with the database's message on a query error.
+ */
+export async function scanDevices(
+  supabase: Client,
+  table: string,
+  schema: PayloadSchema,
+): Promise<DeviceScan> {
+  // A schema with no device column has no device list to offer.
+  if (!schema.deviceKey) return { devices: [], withoutUid: false, truncated: false };
+
+  const deviceKey = schema.deviceKey;
+  const receivedKey = schema.receivedKey;
+  const devices = new Map<string, DeviceSummary>();
+  let withoutUid = false;
+  let truncated = false;
+
+  for (let offset = 0; offset < DEVICE_SCAN_MAX_ROWS; offset += DEVICE_SCAN_CHUNK) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(`${deviceKey},${receivedKey}`)
+      .order(receivedKey, { ascending: false })
+      .range(offset, offset + DEVICE_SCAN_CHUNK - 1);
+
+    if (error) throw new Error(error.message);
+
+    for (const row of (data ?? []) as unknown as Record<string, string | null>[]) {
+      const uid = row[deviceKey];
+      if (!uid) {
+        withoutUid = true;
+        continue;
+      }
+      const known = devices.get(uid);
+      if (known) {
+        known.payloads += 1;
+      } else {
+        // Rows arrive newest first, so the first one seen is the last seen.
+        devices.set(uid, {
+          device_uid: uid,
+          payloads: 1,
+          last_seen: row[receivedKey] ?? "",
+        });
+      }
+    }
+
+    if (!data || data.length < DEVICE_SCAN_CHUNK) break;
+    if (offset + DEVICE_SCAN_CHUNK >= DEVICE_SCAN_MAX_ROWS) truncated = true;
+  }
+
+  return { devices: Array.from(devices.values()), withoutUid, truncated };
+}
+
+/** The remote-config fields of a device's most recent payload. */
+export interface LatestConfigReport {
+  received_at: string;
+  /** CRC32 of the config the device runs. Null when the payload's format has none. */
+  config_crc32: number | null;
+  /** Result of the device's last config poll. Null when the format has none. */
+  last_poll_status: number | null;
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.trim() !== "" && !Number.isNaN(Number(value))) {
+    return Number(value);
+  }
+  return null;
+}
+
+/**
+ * `config_crc32` and `last_poll_status` of the newest payload of one device.
+ *
+ * `payloads_REE` stores them as columns; `payloads` keeps them in the `context`
+ * JSONB. Either is null for a payload whose format predates them (V1 before
+ * the 93-byte revision), and for REE rows stored before the context columns.
+ * `storedUid` must be in the table's own UID format.
+ */
+export async function latestConfigReport(
+  supabase: Client,
+  table: string,
+  schema: PayloadSchema,
+  storedUid: string,
+): Promise<LatestConfigReport | null> {
+  if (!schema.deviceKey) return null;
+
+  const columns =
+    schema.id === "ree"
+      ? `${schema.receivedKey},config_crc32,last_poll_status`
+      : `${schema.receivedKey},config_crc32:context->config_crc32,last_poll_status:context->last_poll_status`;
+
+  const { data, error } = await supabase
+    .from(table)
+    .select(columns)
+    .eq(schema.deviceKey, storedUid)
+    .order(schema.receivedKey, { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  if (!data) return null;
+
+  const row = data as unknown as Record<string, unknown>;
+  return {
+    received_at: String(row[schema.receivedKey] ?? ""),
+    config_crc32: asNumber(row.config_crc32),
+    last_poll_status: asNumber(row.last_poll_status),
+  };
+}
+
+/* ------------------------------------------------------------- remote config */
+
+const REMOTE_CONFIG_UNAVAILABLE =
+  "Remote config is only available in the Development environment.";
+
+/**
+ * Why the Remote config endpoints must refuse this environment, or null when
+ * its schema offers them. The tab is hidden there too; this is the server's
+ * own check, so a direct API call gets the same answer.
+ */
+export function remoteConfigUnavailable(
+  resolved: ResolvedEnvironment,
+): EnvironmentResolutionError | null {
+  if (resolved.schema.capabilities.remoteConfig) return null;
+  return {
+    status: 403,
+    error: "Remote config not available",
+    details: `${REMOTE_CONFIG_UNAVAILABLE} "${resolved.environment}" does not offer it.`,
+  };
+}
+
+/**
+ * Why a device must not be given a remote config, or null. A device whose
+ * reports are routed to an environment without remote config (the REE devices)
+ * is refused whatever environment the request names.
+ */
+export function remoteConfigRefusedForDevice(
+  deviceUid: string,
+): EnvironmentResolutionError | null {
+  const home = resolveEnvironment(environmentForDeviceUid(deviceUid));
+  if (!home.ok || home.value.schema.capabilities.remoteConfig) return null;
+  return {
+    status: 403,
+    error: "Remote config not available for this device",
+    details: `${deviceUid} reports to ${home.value.environment}. ${REMOTE_CONFIG_UNAVAILABLE}`,
+  };
+}

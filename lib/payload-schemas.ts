@@ -68,6 +68,11 @@ export interface PayloadSchemaCapabilities {
   deviceFilter: boolean;
   /** The UI can write rows into this table. */
   writable: boolean;
+  /**
+   * The Remote config tab is offered, for the devices reporting to this
+   * dataset. Development only: the REE devices are not configured remotely.
+   */
+  remoteConfig: boolean;
 }
 
 export interface PayloadSchema {
@@ -90,12 +95,18 @@ export interface PayloadSchema {
    */
   deviceUidFormat: "colon" | "plain";
   fields: PayloadFieldDef[];
-  /** Field keys shown as columns of the list view, in order. */
+  /**
+   * Field keys shown as columns of the list view until the reader saves a view
+   * of their own (every field in `fields` can be picked).
+   */
   listColumns: string[];
-  /** Field keys offered as chart series, in order. */
-  chartSeries: string[];
-  /** Series selected the first time the charts are opened. */
-  defaultChartSeries: string[];
+  /**
+   * Every chart the reception timeline offers, in order: built-in chart keys
+   * (BUILT_IN_CHARTS) followed by the chartable column keys.
+   */
+  charts: string[];
+  /** Charts shown until the reader saves a view of their own. */
+  defaultCharts: string[];
   /**
    * Column sets the summary endpoint tries, richest first. A tier naming a
    * column the database does not have is rejected with PostgREST 42703 and the
@@ -115,71 +126,17 @@ export interface PayloadSchema {
   writeDeviceUids?: string[];
 }
 
-/* ------------------------------------------------------- development schema */
+/* -------------------------------------------------- V1 fields, one per column */
 
-const DEVELOPMENT_FIELDS: PayloadFieldDef[] = [
-  { key: "id", label: "Row ID", kind: "mono", group: "Report", description: "Database row ID." },
-  { key: "created_at", label: "Received", kind: "timestamp", group: "Report", description: "Database insertion timestamp." },
-  { key: "device_uid", label: "Device UID", kind: "mono", group: "Report", protocolType: "uint8[8]", description: "Device IEEE 802.15.4 UID. Null for V0 payloads, which carry none." },
-  { key: "payload_version", label: "Version", kind: "integer", group: "Report", protocolType: "uint8", description: "Payload format version." },
-  { key: "sample_count", label: "Samples", kind: "integer", group: "Report", protocolType: "uint8", description: "Number of samples contained in the report." },
-  { key: "error_mask", label: "Error mask", kind: "errorMask", group: "Report", protocolType: "uint32", description: "Active device error flags." },
-  { key: "reporting_counter", label: "Counter", kind: "integer", group: "Report", protocolType: "uint32", description: "Monotonic report counter." },
-  { key: "byte_length", label: "Bytes", kind: "integer", unit: "B", group: "Report", description: "Total received length in bytes." },
-];
+// Both tables store every V1 field in a column of the same name, unit and
+// scale: payloads_REE natively, payloads through the generated columns of
+// scripts/004, 005 and 008 (read from its `samples` / `context` JSONB). So both
+// schemas share these definitions.
 
-const BASE_SUMMARY_COLUMNS = "created_at,byte_length,reporting_counter,error_mask";
-
-export const DEVELOPMENT_SCHEMA: PayloadSchema = {
-  id: "development",
-  table: ENVIRONMENT_CONFIG.Development.payloadTable,
-  rowNoun: "payload",
-  rowNounPlural: "payloads",
-  primaryKey: "id",
-  receivedKey: "created_at",
-  deviceKey: "device_uid",
-  deviceUidFormat: "colon",
-  fields: DEVELOPMENT_FIELDS,
-  listColumns: [
-    "created_at",
-    "device_uid",
-    "payload_version",
-    "sample_count",
-    "error_mask",
-    "reporting_counter",
-    "byte_length",
-  ],
-  // Reception, size, counter, battery and coverage each already have a chart
-  // tuned to what they mean, so the generic series picker is not offered here.
-  chartSeries: [],
-  defaultChartSeries: [],
-  summaryColumnTiers: [
-    // scripts/005: the reporting-loss counters.
-    BASE_SUMMARY_COLUMNS +
-      ",battery_soc,battery_voltage,rsrp,snr,reporting_lost_counter,tx_failed",
-    // scripts/004: battery and radio diagnostics.
-    BASE_SUMMARY_COLUMNS + ",battery_soc,battery_voltage,rsrp,snr",
-    // Original schema only.
-    BASE_SUMMARY_COLUMNS,
-  ],
-  csvColumns: CSV_COLUMNS,
-  csvBasename: "payloads",
-  capabilities: {
-    rawPayloadInspector: true,
-    errorMask: true,
-    byteSizeChart: true,
-    diagnosticsCharts: true,
-    deviceFilter: true,
-    writable: true,
-  },
-};
-
-/* --------------------------------------------------------------- REE schema */
-
-// Which valid_sample_mask bit governs which REE column. The bits themselves are
+// Which valid_sample_mask bit governs which column. The bits themselves are
 // the protocol's (VALID_SAMPLE_BITS in lib/payload-errors); only the column
-// names differ, because payloads_REE spells two of them out in full.
-const REE_VALID_BIT = {
+// names differ, because two columns spell the protocol's abbreviation out.
+const VALID_BIT = {
   ambient: 0,
   luminosity: 1,
   accelerometer: 2,
@@ -191,13 +148,13 @@ const REE_VALID_BIT = {
 } as const;
 
 // What each V1 context field means, for the detail view. The inspector adds a
-// value-specific reading on top (an enum name, the status flags spelled out…).
-const REE_CONTEXT_DESCRIPTIONS: Record<string, string> = {
+// value-specific reading on top (an enum name, the status flags spelled out...).
+const V1_CONTEXT_DESCRIPTIONS: Record<string, string> = {
   error_mask: "Active device error flags.",
   last_communication_error: "Result of the last transmission attempt.",
   battery_soc: "Fuel gauge state of charge. Not clamped: a reading above 100 is sent as-is.",
   battery_voltage: "Battery voltage.",
-  config_crc32: "CRC32 of the active configuration. Reserved: always 0 until remote configuration polling exists.",
+  config_crc32: "CRC32 of the configuration file the device runs. Matches the file CRC on the Remote config tab once a saved config is applied.",
   boot_count: "Lifetime boot count, never cleared.",
   reset_source: "MCU reset source of the last boot.",
   rsrp: "Received signal power, previous transmission cycle. 0 means not available.",
@@ -209,30 +166,37 @@ const REE_CONTEXT_DESCRIPTIONS: Record<string, string> = {
   last_tx_duration_ms: "Duration of the last transmission.",
   reporting_lost_counter: "Reports lost since boot. Read as a delta between reports.",
   tx_failed: "Failed transmissions since boot. Read as a delta between reports.",
-  last_poll_status: "Result of the last configuration poll. Reserved: always 0 for now.",
+  last_poll_status: "Result of the last remote configuration poll (GET /api/config).",
 };
 
-// The V1 context fields as REE columns, one per field, taken from the decoder's
-// own table so labels, types and units cannot drift from the protocol.
-const REE_CONTEXT_FIELDS: PayloadFieldDef[] = V1_CONTEXT_FIELDS.map((field) => ({
+// Context numbers that read sensibly as a per-bucket mean. battery_soc and rsrp
+// have built-in charts of their own; bitmasks, enums and the CRC do not plot.
+const CHARTABLE_CONTEXT = new Set([
+  "battery_voltage",
+  "boot_count",
+  "tau",
+  "active_time",
+  "last_attach_duration_ms",
+  "last_tx_duration_ms",
+  "reporting_lost_counter",
+  "tx_failed",
+]);
+
+// The V1 context fields, one column each, taken from the decoder's own table so
+// labels, types and units cannot drift from the protocol.
+const V1_CONTEXT_COLUMN_FIELDS: PayloadFieldDef[] = V1_CONTEXT_FIELDS.map((field) => ({
   key: field.key,
   label: field.label,
   unit: field.unit || undefined,
   kind: field.key === "error_mask" ? "errorMask" : "integer",
   group: "Context",
   protocolType: field.type,
-  description: REE_CONTEXT_DESCRIPTIONS[field.key],
+  description: V1_CONTEXT_DESCRIPTIONS[field.key],
+  chartable: CHARTABLE_CONTEXT.has(field.key) || undefined,
 }));
 
-const REE_FIELDS: PayloadFieldDef[] = [
-  // Database / report information.
-  { key: "id", label: "Row ID", kind: "integer", group: "Report", description: "Database row ID." },
-  { key: "created_at", label: "Received", kind: "timestamp", group: "Report", description: "Database insertion timestamp." },
-  { key: "payload_version", label: "Payload version", kind: "integer", group: "Report", protocolType: "uint8", description: "Payload format version." },
-  { key: "device_uid", label: "Device UID", kind: "mono", group: "Report", protocolType: "text", description: "Device IEEE 802.15.4 UID." },
-  { key: "sample_count", label: "Sample count", kind: "integer", group: "Report", protocolType: "uint8", description: "Number of samples contained in the report." },
-  { key: "reporting_counter", label: "Reporting counter", kind: "integer", group: "Report", protocolType: "uint32", description: "Monotonic report counter." },
-
+// The V1 sample: its read time, the 14 sensor channels and the valid mask.
+const V1_SAMPLE_COLUMN_FIELDS: PayloadFieldDef[] = [
   // Sample information.
   {
     key: "sample_time",
@@ -246,43 +210,158 @@ const REE_FIELDS: PayloadFieldDef[] = [
   },
 
   // Temperature.
-  { key: "thermocouple_1", label: "Thermocouple 1", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Cable temperature, probe 1.", validBit: REE_VALID_BIT.thermocouple1, chartable: true },
-  { key: "thermocouple_2", label: "Thermocouple 2", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Cable temperature, probe 2.", validBit: REE_VALID_BIT.thermocouple2, chartable: true },
-  { key: "current_1_internal_temperature", label: "Current Sensor 1 Internal Temperature", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Die/internal temperature of magnetic sensor 1.", validBit: REE_VALID_BIT.current1, chartable: true },
-  { key: "current_2_internal_temperature", label: "Current Sensor 2 Internal Temperature", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Die/internal temperature of magnetic sensor 2.", validBit: REE_VALID_BIT.current2, chartable: true },
-  { key: "ambient_temperature", label: "Ambient Temperature", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Temperature outside the enclosure.", validBit: REE_VALID_BIT.ambient, chartable: true },
-  { key: "internal_temperature", label: "Internal Temperature", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Temperature inside the enclosure.", validBit: REE_VALID_BIT.internal, chartable: true },
+  { key: "thermocouple_1", label: "Thermocouple 1", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Cable temperature, probe 1.", validBit: VALID_BIT.thermocouple1, chartable: true },
+  { key: "thermocouple_2", label: "Thermocouple 2", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Cable temperature, probe 2.", validBit: VALID_BIT.thermocouple2, chartable: true },
+  { key: "current_1_internal_temperature", label: "Current Sensor 1 Internal Temperature", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Die/internal temperature of magnetic sensor 1.", validBit: VALID_BIT.current1, chartable: true },
+  { key: "current_2_internal_temperature", label: "Current Sensor 2 Internal Temperature", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Die/internal temperature of magnetic sensor 2.", validBit: VALID_BIT.current2, chartable: true },
+  { key: "ambient_temperature", label: "Ambient Temperature", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Temperature outside the enclosure.", validBit: VALID_BIT.ambient, chartable: true },
+  { key: "internal_temperature", label: "Internal Temperature", unit: "°C", kind: "number", decimals: 1, group: "Temperature", description: "Temperature inside the enclosure.", validBit: VALID_BIT.internal, chartable: true },
 
   // Humidity.
-  { key: "ambient_humidity", label: "Ambient Humidity", unit: "%RH", kind: "number", decimals: 1, group: "Humidity", description: "Humidity outside the enclosure.", validBit: REE_VALID_BIT.ambient, chartable: true },
-  { key: "internal_humidity", label: "Internal Humidity", unit: "%RH", kind: "number", decimals: 1, group: "Humidity", description: "Humidity inside the enclosure.", validBit: REE_VALID_BIT.internal, chartable: true },
+  { key: "ambient_humidity", label: "Ambient Humidity", unit: "%RH", kind: "number", decimals: 1, group: "Humidity", description: "Humidity outside the enclosure.", validBit: VALID_BIT.ambient, chartable: true },
+  { key: "internal_humidity", label: "Internal Humidity", unit: "%RH", kind: "number", decimals: 1, group: "Humidity", description: "Humidity inside the enclosure.", validBit: VALID_BIT.internal, chartable: true },
 
   // Luminosity.
-  { key: "luminosity", label: "Luminosity", unit: "lux", kind: "integer", group: "Luminosity", description: "Ambient light.", validBit: REE_VALID_BIT.luminosity, chartable: true },
+  { key: "luminosity", label: "Luminosity", unit: "lux", kind: "integer", group: "Luminosity", description: "Ambient light.", validBit: VALID_BIT.luminosity, chartable: true },
 
   // Acceleration.
-  { key: "acceleration_x", label: "Acceleration X", unit: "mg", kind: "integer", group: "Acceleration", validBit: REE_VALID_BIT.accelerometer, chartable: true },
-  { key: "acceleration_y", label: "Acceleration Y", unit: "mg", kind: "integer", group: "Acceleration", validBit: REE_VALID_BIT.accelerometer, chartable: true },
-  { key: "acceleration_z", label: "Acceleration Z", unit: "mg", kind: "integer", group: "Acceleration", validBit: REE_VALID_BIT.accelerometer, chartable: true },
+  { key: "acceleration_x", label: "Acceleration X", unit: "mg", kind: "integer", group: "Acceleration", validBit: VALID_BIT.accelerometer, chartable: true },
+  { key: "acceleration_y", label: "Acceleration Y", unit: "mg", kind: "integer", group: "Acceleration", validBit: VALID_BIT.accelerometer, chartable: true },
+  { key: "acceleration_z", label: "Acceleration Z", unit: "mg", kind: "integer", group: "Acceleration", validBit: VALID_BIT.accelerometer, chartable: true },
 
   // Magnetic field.
-  { key: "magnetic_field_1", label: "Magnetic Field 1", unit: "µT", kind: "integer", group: "Magnetic field", description: "RMS magnetic field from sensor 1.", validBit: REE_VALID_BIT.current1, chartable: true },
-  { key: "magnetic_field_2", label: "Magnetic Field 2", unit: "µT", kind: "integer", group: "Magnetic field", description: "RMS magnetic field from sensor 2.", validBit: REE_VALID_BIT.current2, chartable: true },
+  { key: "magnetic_field_1", label: "Magnetic Field 1", unit: "µT", kind: "integer", group: "Magnetic field", description: "RMS magnetic field from sensor 1.", validBit: VALID_BIT.current1, chartable: true },
+  { key: "magnetic_field_2", label: "Magnetic Field 2", unit: "µT", kind: "integer", group: "Magnetic field", description: "RMS magnetic field from sensor 2.", validBit: VALID_BIT.current2, chartable: true },
 
   // Validity.
   { key: "valid_sample_mask", label: "Valid Sample Mask", kind: "sampleMask", group: "Validity", description: "Bitmask indicating which sensor measurements were successfully acquired." },
-
-  // The report's batch context, one column per field.
-  ...REE_CONTEXT_FIELDS,
 ];
 
-// The context columns the diagnostics charts read: battery, coverage and the
-// reporting-loss counters, plus the error mask that tells a failed fuel gauge
-// from a flat battery.
-const REE_DIAGNOSTIC_COLUMNS =
-  "error_mask,battery_soc,battery_voltage,rsrp,snr,reporting_lost_counter,tx_failed";
+/* ------------------------------------------------------------------- views */
 
-const REE_MEASUREMENT_KEYS = REE_FIELDS.filter((field) => field.chartable).map(
+/**
+ * Charts the timeline draws with a dedicated renderer, by key. Every other
+ * chart key is a column, drawn as a generic per-bucket series.
+ */
+export const BUILT_IN_CHARTS: Record<string, string> = {
+  reception: "Reception frequency",
+  payload_size: "Payload size (bytes)",
+  reporting_counter: "Frame counter (reporting_counter)",
+  battery_soc: "Battery state of charge (%)",
+  rsrp: "Cellular coverage (RSRP / SNR)",
+};
+
+/** Table columns shown until the reader saves a view, in both environments. */
+const DEFAULT_LIST_COLUMNS = ["created_at", "device_uid", "error_mask", "reporting_counter"];
+
+/** Charts shown until the reader saves a view, in both environments. */
+const DEFAULT_CHARTS = ["battery_soc"];
+
+function chartableKeys(fields: PayloadFieldDef[]): string[] {
+  return fields.filter((field) => field.chartable).map((field) => field.key);
+}
+
+// Columns the diagnostics charts read: battery, coverage and the reporting-loss
+// counters, plus the error mask that tells a failed fuel gauge from a flat
+// battery.
+const DIAGNOSTIC_COLUMNS = [
+  "error_mask",
+  "battery_soc",
+  "battery_voltage",
+  "rsrp",
+  "snr",
+  "reporting_lost_counter",
+  "tx_failed",
+];
+
+/** A comma-separated select list, each column once, in first-seen order. */
+function selectList(columns: string[]): string {
+  return Array.from(new Set(columns)).join(",");
+}
+
+/* ------------------------------------------------------- development schema */
+
+const DEVELOPMENT_FIELDS: PayloadFieldDef[] = [
+  { key: "id", label: "Row ID", kind: "mono", group: "Report", description: "Database row ID." },
+  { key: "created_at", label: "Received", kind: "timestamp", group: "Report", description: "Database insertion timestamp." },
+  { key: "device_uid", label: "Device UID", kind: "mono", group: "Report", protocolType: "uint8[8]", description: "Device IEEE 802.15.4 UID. Null only for V0 payloads stored before V0 was discarded." },
+  { key: "payload_version", label: "Version", kind: "integer", group: "Report", protocolType: "uint8", description: "Payload format version." },
+  { key: "sample_count", label: "Samples", kind: "integer", group: "Report", protocolType: "uint8", description: "Number of samples contained in the report." },
+  { key: "reporting_counter", label: "Counter", kind: "integer", group: "Report", protocolType: "uint32", description: "Monotonic report counter." },
+  { key: "byte_length", label: "Bytes", kind: "integer", unit: "B", group: "Report", description: "Total received length in bytes." },
+  { key: "source_ip", label: "Source IP", kind: "mono", group: "Report", description: "Address the payload was received from." },
+  // The first sample's channels (a V1 report carries one), then the context.
+  ...V1_SAMPLE_COLUMN_FIELDS,
+  ...V1_CONTEXT_COLUMN_FIELDS,
+];
+
+const DEVELOPMENT_CHARTABLE = chartableKeys(DEVELOPMENT_FIELDS);
+const BASE_SUMMARY_COLUMNS = ["created_at", "byte_length", "reporting_counter", "error_mask"];
+
+export const DEVELOPMENT_SCHEMA: PayloadSchema = {
+  id: "development",
+  table: ENVIRONMENT_CONFIG.Development.payloadTable,
+  rowNoun: "payload",
+  rowNounPlural: "payloads",
+  primaryKey: "id",
+  receivedKey: "created_at",
+  deviceKey: "device_uid",
+  deviceUidFormat: "colon",
+  fields: DEVELOPMENT_FIELDS,
+  listColumns: DEFAULT_LIST_COLUMNS,
+  charts: [
+    "reception",
+    "payload_size",
+    "reporting_counter",
+    "battery_soc",
+    "rsrp",
+    ...DEVELOPMENT_CHARTABLE,
+  ],
+  defaultCharts: DEFAULT_CHARTS,
+  summaryColumnTiers: [
+    // scripts/008: every V1 field has its column.
+    selectList([
+      ...BASE_SUMMARY_COLUMNS,
+      "valid_sample_mask",
+      ...DIAGNOSTIC_COLUMNS,
+      ...DEVELOPMENT_CHARTABLE,
+    ]),
+    // scripts/004 only: battery and radio diagnostics.
+    selectList([...BASE_SUMMARY_COLUMNS, "battery_soc", "battery_voltage", "rsrp", "snr"]),
+    // Original schema only.
+    selectList(BASE_SUMMARY_COLUMNS),
+  ],
+  csvColumns: CSV_COLUMNS,
+  csvBasename: "payloads",
+  capabilities: {
+    rawPayloadInspector: true,
+    errorMask: true,
+    byteSizeChart: true,
+    diagnosticsCharts: true,
+    deviceFilter: true,
+    writable: true,
+    remoteConfig: true,
+  },
+};
+
+/* --------------------------------------------------------------- REE schema */
+
+const REE_FIELDS: PayloadFieldDef[] = [
+  // Database / report information.
+  { key: "id", label: "Row ID", kind: "integer", group: "Report", description: "Database row ID." },
+  { key: "created_at", label: "Received", kind: "timestamp", group: "Report", description: "Database insertion timestamp." },
+  { key: "payload_version", label: "Payload version", kind: "integer", group: "Report", protocolType: "uint8", description: "Payload format version." },
+  { key: "device_uid", label: "Device UID", kind: "mono", group: "Report", protocolType: "text", description: "Device IEEE 802.15.4 UID." },
+  { key: "sample_count", label: "Sample count", kind: "integer", group: "Report", protocolType: "uint8", description: "Number of samples contained in the report." },
+  { key: "reporting_counter", label: "Reporting counter", kind: "integer", group: "Report", protocolType: "uint32", description: "Monotonic report counter." },
+
+  ...V1_SAMPLE_COLUMN_FIELDS,
+  // The report's batch context, one column per field.
+  ...V1_CONTEXT_COLUMN_FIELDS,
+];
+
+const REE_CHARTABLE = chartableKeys(REE_FIELDS);
+const REE_SENSOR_KEYS = V1_SAMPLE_COLUMN_FIELDS.filter((field) => field.chartable).map(
   (field) => field.key,
 );
 
@@ -314,39 +393,21 @@ export const REE_SCHEMA: PayloadSchema = {
   deviceKey: "device_uid",
   deviceUidFormat: "plain",
   fields: REE_FIELDS,
-  listColumns: [
-    "created_at",
-    "device_uid",
-    "payload_version",
-    "sample_time",
-    "ambient_temperature",
-    "ambient_humidity",
-    "reporting_counter",
-    "valid_sample_mask",
-  ],
-  chartSeries: REE_MEASUREMENT_KEYS,
-  defaultChartSeries: [
-    "ambient_temperature",
-    "internal_temperature",
-    "ambient_humidity",
-    "luminosity",
-  ],
+  listColumns: DEFAULT_LIST_COLUMNS,
+  // No payload-size chart: payloads_REE keeps no byte_length.
+  charts: ["reception", "reporting_counter", "battery_soc", "rsrp", ...REE_CHARTABLE],
+  defaultCharts: DEFAULT_CHARTS,
   summaryColumnTiers: [
     // With the context columns.
-    [
+    selectList([
       "created_at",
       "reporting_counter",
       "valid_sample_mask",
-      ...REE_MEASUREMENT_KEYS,
-      REE_DIAGNOSTIC_COLUMNS,
-    ].join(","),
+      ...DIAGNOSTIC_COLUMNS,
+      ...REE_CHARTABLE,
+    ]),
     // A table without them still charts the sensor channels.
-    [
-      "created_at",
-      "reporting_counter",
-      "valid_sample_mask",
-      ...REE_MEASUREMENT_KEYS,
-    ].join(","),
+    selectList(["created_at", "reporting_counter", "valid_sample_mask", ...REE_SENSOR_KEYS]),
   ],
   csvColumns: REE_CSV_COLUMNS,
   csvBasename: "payloads-ree",
@@ -357,6 +418,7 @@ export const REE_SCHEMA: PayloadSchema = {
     diagnosticsCharts: true,
     deviceFilter: true,
     writable: true,
+    remoteConfig: false,
   },
   // Enforced by the database, not by the frontend: an insert with any other UID
   // is rejected and the rejection is surfaced as-is. Also the list the ingestion

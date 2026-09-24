@@ -58,7 +58,10 @@ import {
 import { downloadCsv } from "@/lib/payload-csv";
 import { createdAtBoundFromInput } from "@/lib/utils";
 import { useActiveEnvironment } from "@/components/environment-provider";
+import { useSavedView } from "@/components/use-saved-view";
+import { ViewPicker } from "@/components/view-picker";
 import {
+  BUILT_IN_CHARTS,
   fieldLabel,
   fieldOf,
   type PayloadFieldDef,
@@ -116,11 +119,13 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
   // this card only renders inside the environment guard.
   const { environment, schema } = useActiveEnvironment();
 
-  // Measurement columns the reader has chosen to plot. Only datasets that
-  // declare chartable sensor columns offer this; Development's series each
-  // have a chart of their own already.
-  const [selectedSeries, setSelectedSeries] = useState<string[]>(
-    () => schema.defaultChartSeries,
+  // The charts the reader has chosen — built-in ones and any chartable column —
+  // saved per environment in this browser, or the schema's defaults.
+  const chartsView = useSavedView(
+    schema.id,
+    "charts",
+    schema.charts,
+    schema.defaultCharts,
   );
 
   const [points, setPoints] = useState<SummaryPoint[]>([]);
@@ -176,15 +181,15 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
     };
   }, [fromBound, toBound, deviceUid, refreshKey, environment.name]);
 
-  // The chosen measurement columns, in the schema's own order, each carrying
-  // the valid-sample bit that says whether a reading is a measurement at all.
+  // The chosen column charts, in the schema's own order, each carrying the
+  // valid-sample bit that says whether a reading is a measurement at all.
   const seriesFields = useMemo(
     () =>
-      schema.chartSeries
-        .filter((key) => selectedSeries.includes(key))
+      chartsView.selected
+        .filter((key) => !(key in BUILT_IN_CHARTS))
         .map((key) => fieldOf(schema, key))
         .filter((field): field is PayloadFieldDef => field !== undefined),
-    [schema, selectedSeries],
+    [schema, chartsView.selected],
   );
 
   const seriesSpecs = useMemo<SeriesSpec[]>(
@@ -269,16 +274,6 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
     }
   }, [schema.id]);
 
-  // Toggle one measurement series. Unlike the CSV column picker this may fall
-  // to empty: a reader who wants only the reception charts should get them.
-  const toggleSeries = useCallback((key: string) => {
-    setSelectedSeries((current) =>
-      current.includes(key)
-        ? current.filter((item) => item !== key)
-        : [...current, key],
-    );
-  }, []);
-
   return (
     <Card>
       <CardHeader>
@@ -356,58 +351,31 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
                 ))}
               </select>
             </div>
-            {/* Only datasets whose schema declares chartable sensor columns
-                offer this; the Development series each have their own chart. */}
-            {schema.chartSeries.length > 0 && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" className="gap-2">
-                    <SlidersHorizontal className="h-4 w-4" />
-                    Series
-                    <span className="text-xs text-muted-foreground">
-                      ({seriesFields.length}/{schema.chartSeries.length})
-                    </span>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="max-h-80 w-72 overflow-y-auto">
-                  <DropdownMenuLabel>Measurement series</DropdownMenuLabel>
-                  <div className="flex gap-1 px-1 py-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 flex-1"
-                      onClick={() => setSelectedSeries(schema.chartSeries)}
-                    >
-                      Select all
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 flex-1"
-                      onClick={() => setSelectedSeries([])}
-                    >
-                      Deselect all
-                    </Button>
-                  </div>
-                  <DropdownMenuSeparator />
-                  {schema.chartSeries.map((key) => {
-                    const field = fieldOf(schema, key);
-                    if (!field) return null;
-                    return (
-                      <DropdownMenuCheckboxItem
-                        key={key}
-                        checked={selectedSeries.includes(key)}
-                        // Keep the menu open so several can be toggled at once.
-                        onSelect={(e) => e.preventDefault()}
-                        onCheckedChange={() => toggleSeries(key)}
-                      >
-                        {fieldLabel(field)}
-                      </DropdownMenuCheckboxItem>
-                    );
-                  })}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
+            <ViewPicker
+              trigger={
+                <>
+                  <SlidersHorizontal className="h-4 w-4" />
+                  Charts
+                </>
+              }
+              title="Charts"
+              items={schema.charts.map((key) => {
+                const field = fieldOf(schema, key);
+                return {
+                  key,
+                  label: BUILT_IN_CHARTS[key] ?? (field ? fieldLabel(field) : key),
+                  group: key in BUILT_IN_CHARTS ? "Reception and diagnostics" : field?.group,
+                };
+              })}
+              selected={chartsView.selected}
+              onToggle={chartsView.toggle}
+              onSelectAll={() => chartsView.setSelected(schema.charts)}
+              onClear={() => chartsView.setSelected([])}
+              onSave={chartsView.save}
+              onReset={chartsView.reset}
+              unsaved={chartsView.unsaved}
+              hasSavedView={chartsView.hasSavedView}
+            />
             <Button
               variant="outline"
               size="sm"
@@ -479,29 +447,17 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
                 loading ? "opacity-60" : "opacity-100"
               }`}
             >
-              <FrequencyChart timeline={timeline} schema={schema} />
-              {/* Only a dataset that stores the raw frame has a size to plot. */}
-              {schema.capabilities.byteSizeChart && (
-                <ByteSizeChart timeline={timeline} schema={schema} />
+              {chartsView.selected.length === 0 && (
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  No chart selected — pick some under Charts.
+                </p>
               )}
-              <CounterChart timeline={timeline} schema={schema} />
-              {/* V1 only: a range of V0 payloads carries no diagnostics, and an
-                  empty plot says less than no plot at all. */}
-              {schema.capabilities.diagnosticsCharts &&
-                timeline.batteryCount > 0 && (
-                  <BatteryChart timeline={timeline} schema={schema} />
-                )}
-              {schema.capabilities.diagnosticsCharts &&
-                timeline.signalCount > 0 && (
-                  <SignalChart timeline={timeline} schema={schema} />
-                )}
-              {/* Sensor channels the active schema declares chartable. */}
-              {seriesFields.map((field) => (
-                <SeriesChart
-                  key={field.key}
+              {chartsView.selected.map((key) => (
+                <TimelineChart
+                  key={key}
+                  chartKey={key}
                   timeline={timeline}
                   schema={schema}
-                  field={field}
                 />
               ))}
             </div>
@@ -524,6 +480,73 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
 interface ChartProps {
   timeline: Timeline;
   schema: PayloadSchema;
+}
+
+/** One chart of the timeline, by key: a built-in chart or a column series. */
+function TimelineChart({
+  chartKey,
+  timeline,
+  schema,
+}: ChartProps & { chartKey: string }) {
+  switch (chartKey) {
+    case "reception":
+      return <FrequencyChart timeline={timeline} schema={schema} />;
+    case "payload_size":
+      // Only a dataset that stores the raw frame has a size to plot.
+      return schema.capabilities.byteSizeChart ? (
+        <ByteSizeChart timeline={timeline} schema={schema} />
+      ) : null;
+    case "reporting_counter":
+      return <CounterChart timeline={timeline} schema={schema} />;
+    case "battery_soc":
+      return timeline.batteryCount > 0 ? (
+        <BatteryChart timeline={timeline} schema={schema} />
+      ) : (
+        <EmptyChart
+          icon={<BatteryMedium className="h-3.5 w-3.5 text-primary" />}
+          title={BUILT_IN_CHARTS.battery_soc}
+          reason="No battery reading in this range (V0 payloads carry none, and a failed fuel gauge is excluded)."
+        />
+      );
+    case "rsrp":
+      return timeline.signalCount > 0 ? (
+        <SignalChart timeline={timeline} schema={schema} />
+      ) : (
+        <EmptyChart
+          icon={<SignalHigh className="h-3.5 w-3.5 text-primary" />}
+          title={BUILT_IN_CHARTS.rsrp}
+          reason="No coverage reading in this range (0 means not available)."
+        />
+      );
+    default: {
+      const field = fieldOf(schema, chartKey);
+      return field ? (
+        <SeriesChart timeline={timeline} schema={schema} field={field} />
+      ) : null;
+    }
+  }
+}
+
+function EmptyChart({
+  icon,
+  title,
+  reason,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  reason: string;
+}) {
+  return (
+    <figure className="space-y-1">
+      <figcaption className="space-y-0.5">
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          {icon}
+          {title}
+        </h3>
+        <p className="text-xs text-muted-foreground">{reason}</p>
+      </figcaption>
+    </figure>
+  );
 }
 
 function FrequencyChart({ timeline, schema }: ChartProps) {

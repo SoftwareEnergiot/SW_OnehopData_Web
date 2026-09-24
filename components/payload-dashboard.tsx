@@ -3,15 +3,16 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PayloadPlayground } from "@/components/payload-playground";
 import { ReceivedPayloads } from "@/components/received-payloads";
+import { RemoteConfig } from "@/components/remote-config";
 import { UserMenu } from "@/components/user-menu";
 import { EnvironmentBadge } from "@/components/environment-selector";
 import { useActiveEnvironment } from "@/components/environment-provider";
-import { FlaskConical, Database } from "lucide-react";
+import { FlaskConical, Database, Settings2 } from "lucide-react";
 import Image from "next/image";
 
 export function PayloadDashboard() {
   // Guaranteed by <EnvironmentGuard>, which is what renders this dashboard.
-  const { environment } = useActiveEnvironment();
+  const { environment, schema } = useActiveEnvironment();
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -53,6 +54,12 @@ export function PayloadDashboard() {
                 <Database className="h-4 w-4" />
                 Received Payloads
               </TabsTrigger>
+              {schema.capabilities.remoteConfig && (
+                <TabsTrigger value="remote-config" className="gap-2">
+                  <Settings2 className="h-4 w-4" />
+                  Remote config
+                </TabsTrigger>
+              )}
               <TabsTrigger value="playground" className="gap-2">
                 <FlaskConical className="h-4 w-4" />
                 Playground
@@ -62,6 +69,12 @@ export function PayloadDashboard() {
             <TabsContent value="received">
               <ReceivedPayloads />
             </TabsContent>
+
+            {schema.capabilities.remoteConfig && (
+              <TabsContent value="remote-config">
+                <RemoteConfig />
+              </TabsContent>
+            )}
 
             <TabsContent value="playground">
               <PayloadPlayground />

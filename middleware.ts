@@ -6,6 +6,10 @@ const isPublicRoute = createRouteMatcher([
   // raw binary payloads to /api/payloads and have no Clerk session, so this route
   // must stay public (route matching is by path, not method).
   '/api/payloads(.*)',
+  // Devices poll their remote config here with their own Bearer token, which
+  // the route checks itself. Exact path only: /api/remote-config (the
+  // dashboard's side, which can change a device's config) stays behind Clerk.
+  '/api/config',
 ])
 
 export default clerkMiddleware(

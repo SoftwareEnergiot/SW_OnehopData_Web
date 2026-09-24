@@ -3,6 +3,7 @@
 
 import {
   V1_CONTEXT_FIELDS,
+  V1_LAYOUT,
   V1_SAMPLE_FIELDS,
   type PayloadAnalysis,
 } from "@/lib/payload-decoder";
@@ -19,6 +20,25 @@ export class PayloadInsertError extends Error {
     super(message);
     this.name = "PayloadInsertError";
   }
+}
+
+/**
+ * Why a decoded payload is not accepted for storage, or null when it is.
+ *
+ * Only the current V1 format is accepted, in every environment: V0 and the
+ * earlier 82/86-byte V1 revisions still decode (so stored rows and the
+ * Playground can show them), but a frame in any of them is discarded. Every
+ * accepted payload therefore carries a device UID.
+ */
+export function unsupportedFormat(analysis: PayloadAnalysis): string | null {
+  const { decoded, meta } = analysis;
+  if (decoded.layout_revision !== V1_LAYOUT.revision) {
+    return `Only the current V1 format (${V1_LAYOUT.label}) is accepted; this payload is ${meta.revisionLabel}.`;
+  }
+  if (!decoded.device_uid) {
+    return "Every payload must carry a device UID.";
+  }
+  return null;
 }
 
 /**

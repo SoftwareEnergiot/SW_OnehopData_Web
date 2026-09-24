@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   environmentForDeviceUid,
+  remoteConfigRefusedForDevice,
+  remoteConfigUnavailable,
   resolveEnvironment,
 } from "@/lib/payload-repository";
 import { REE_SCHEMA } from "@/lib/payload-schemas";
@@ -69,5 +71,20 @@ describe("environmentForDeviceUid", () => {
 
   it("routes a malformed UID to Development", () => {
     expect(environmentForDeviceUid("00:12:4B")).toBe("Development");
+  });
+});
+
+describe("remote config availability", () => {
+  it("is offered in Development and refused in REE", () => {
+    const dev = resolveEnvironment("Development");
+    const ree = resolveEnvironment("REE");
+    expect(dev.ok && remoteConfigUnavailable(dev.value)).toBeNull();
+    expect(ree.ok && remoteConfigUnavailable(ree.value)?.status).toBe(403);
+  });
+
+  it("refuses a device whose reports go to REE, whatever the request names", () => {
+    const reeUid = REE_SCHEMA.writeDeviceUids![0];
+    expect(remoteConfigRefusedForDevice(reeUid)?.status).toBe(403);
+    expect(remoteConfigRefusedForDevice("00124B0038A83BF0")).toBeNull();
   });
 });
