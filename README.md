@@ -75,7 +75,7 @@ either environment.
 | Feature | `Development` | `REE` |
 | ------- | ------------- | ----- |
 | List, paging, time range, device filter, refresh | yes | yes |
-| CSV export | yes | yes, REE columns |
+| CSV export: exactly the columns shown in the table | yes | yes |
 | Reception-frequency and frame-counter charts | yes | yes |
 | Detail inspector | binary-vs-hex + field-by-field decode of the stored frame | field-by-field from the stored columns: sensors, batch context, error mask and valid-sample mask |
 | Payload-size chart | yes | no — `payloads_REE` has no `byte_length` |
@@ -91,7 +91,8 @@ either environment.
 The *Received payloads* table and the *Reception timeline* each have a picker
 (**Columns** / **Charts**) offering every column of the environment's table,
 plus the built-in reception, size, counter, battery and coverage charts. The
-selection applies at once; **Save view** keeps it in this browser's
+selection applies at once (and **Download CSV** exports exactly the table's
+columns, in the same order); **Save view** keeps it in this browser's
 `localStorage`, per environment, and **Reset to default** forgets it. The
 defaults, in both environments:
 

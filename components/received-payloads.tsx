@@ -20,15 +20,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { PayloadAnalysisView } from "@/components/payload-analysis";
 import { PayloadRecordView } from "@/components/payload-record-view";
 import { PayloadCharts } from "@/components/payload-charts";
@@ -60,7 +51,6 @@ import {
   Database,
   Download,
   RefreshCw,
-  SlidersHorizontal,
   X,
 } from "lucide-react";
 
@@ -75,12 +65,6 @@ export function ReceivedPayloads() {
   // The dataset this view reads. Guaranteed present: the dashboard only
   // renders behind <EnvironmentGuard>.
   const { environment, schema } = useActiveEnvironment();
-
-  // Every CSV column the active schema offers, used to seed "all selected".
-  const allColumnKeys = useMemo(
-    () => schema.csvColumns.map((column) => column.key),
-    [schema],
-  );
 
   // The columns of the list: any field of the schema, as the reader picked
   // them (saved per environment in this browser), or the schema's defaults.
@@ -118,11 +102,6 @@ export function ReceivedPayloads() {
   const [selectEdge, setSelectEdge] = useState<"first" | "last" | null>(null);
   // Bumped by Refresh so the charts refetch alongside the table.
   const [refreshKey, setRefreshKey] = useState(0);
-  // Columns included in a CSV export, keyed by CSV_COLUMNS[].key. All start
-  // selected; the picker never lets the set fall to empty.
-  const [selectedColumns, setSelectedColumns] = useState<Set<string>>(
-    () => new Set(schema.csvColumns.map((column) => column.key)),
-  );
   // True while a CSV export is gathering rows, to disable the button and show
   // progress.
   const [exporting, setExporting] = useState(false);
@@ -232,31 +211,6 @@ export function ReceivedPayloads() {
     setPage(0);
   }, []);
 
-  // Toggle one column. The last remaining column cannot be turned off, so the
-  // export always carries at least one field.
-  const toggleColumn = useCallback((key: string) => {
-    setSelectedColumns((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        if (next.size === 1) return prev;
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
-  }, []);
-
-  const selectAllColumns = useCallback(() => {
-    setSelectedColumns(new Set(allColumnKeys));
-  }, [allColumnKeys]);
-
-  // "Deselect all" keeps the first column selected — an export needs at least
-  // one field, and this leaves an obvious one to build back up from.
-  const deselectAllColumns = useCallback(() => {
-    setSelectedColumns(new Set([allColumnKeys[0]]));
-  }, [allColumnKeys]);
-
   // Fetch every payload in the current range (all pages), most-recent first.
   const fetchAllInRange = useCallback(async (): Promise<PayloadRow[]> => {
     const all: PayloadRow[] = [];
@@ -291,7 +245,16 @@ export function ReceivedPayloads() {
     return all;
   }, [from, to, deviceUid, environment.name]);
 
-  // Gather the full range and download it as CSV using the selected columns.
+  // The CSV carries exactly the table's columns, in the table's order.
+  const csvColumns = useMemo(
+    () =>
+      columnsView.selected
+        .map((key) => schema.csvColumns.find((column) => column.key === key))
+        .filter((column): column is NonNullable<typeof column> => column !== undefined),
+    [schema, columnsView.selected],
+  );
+
+  // Gather the full range and download it as CSV, with the table's columns.
   const handleDownloadCsv = useCallback(async () => {
     setExporting(true);
     try {
@@ -302,9 +265,7 @@ export function ReceivedPayloads() {
         );
         return;
       }
-      // The active schema's columns, so an export always describes the table
-      // it was read from.
-      const csv = buildCsv(data, selectedColumns, schema.csvColumns);
+      const csv = buildCsv(data, csvColumns);
       const stamp = new Date()
         .toISOString()
         .slice(0, 19)
@@ -320,7 +281,7 @@ export function ReceivedPayloads() {
     } finally {
       setExporting(false);
     }
-  }, [fetchAllInRange, selectedColumns, schema]);
+  }, [fetchAllInRange, csvColumns, schema]);
 
   const hasFilter = from !== "" || to !== "" || deviceUid !== "";
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
@@ -494,61 +455,12 @@ export function ReceivedPayloads() {
                 unsaved={columnsView.unsaved}
                 hasSavedView={columnsView.hasSavedView}
               />
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" className="gap-2">
-                    <SlidersHorizontal className="h-4 w-4" />
-                    CSV columns
-                    <span className="text-xs text-muted-foreground">
-                      ({selectedColumns.size}/{schema.csvColumns.length})
-                    </span>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56">
-                  <DropdownMenuLabel>CSV columns</DropdownMenuLabel>
-                  <div className="flex gap-1 px-1 py-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 flex-1"
-                      onClick={selectAllColumns}
-                    >
-                      Select all
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 flex-1"
-                      onClick={deselectAllColumns}
-                    >
-                      Deselect all
-                    </Button>
-                  </div>
-                  <DropdownMenuSeparator />
-                  {schema.csvColumns.map((column) => {
-                    const checked = selectedColumns.has(column.key);
-                    const isLast = checked && selectedColumns.size === 1;
-                    return (
-                      <DropdownMenuCheckboxItem
-                        key={column.key}
-                        checked={checked}
-                        disabled={isLast}
-                        // Keep the menu open so several columns can be toggled
-                        // in one pass.
-                        onSelect={(e) => e.preventDefault()}
-                        onCheckedChange={() => toggleColumn(column.key)}
-                      >
-                        {column.label}
-                      </DropdownMenuCheckboxItem>
-                    );
-                  })}
-                </DropdownMenuContent>
-              </DropdownMenu>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={handleDownloadCsv}
-                disabled={exporting}
+                disabled={exporting || csvColumns.length === 0}
+                title="Downloads the columns shown in the table"
                 className="gap-2"
               >
                 <Download className="h-4 w-4" />
