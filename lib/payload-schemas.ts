@@ -11,8 +11,10 @@
 // Nothing in this module talks to the database. lib/payload-repository.ts owns
 // that, and reads the table name from here.
 
-import { CSV_COLUMNS, type CsvColumn } from "@/lib/payload-csv";
-import { V1_CONTEXT_FIELDS } from "@/lib/payload-decoder";
+import type { CsvColumn } from "@/lib/payload-csv";
+import { STATUS_FLAG_TIME_UTC, V1_CONTEXT_FIELDS } from "@/lib/payload-decoder";
+import { formatErrorMask } from "@/lib/payload-errors";
+import { formatCreatedAt } from "@/lib/utils";
 import { ENVIRONMENT_CONFIG, configForEnvironment } from "@/lib/environments";
 import type { PayloadSchemaId } from "@/lib/payload-schemas.types";
 import type { PayloadRow, ReePayloadRecord } from "@/lib/types";
@@ -113,6 +115,7 @@ export interface PayloadSchema {
    * next one is tried, so an un-migrated database still charts what it can.
    */
   summaryColumnTiers: string[];
+  /** One CSV column per field; an export takes the ones the table shows. */
   csvColumns: CsvColumn[];
   /** Basename of an exported CSV. */
   csvBasename: string;
@@ -279,6 +282,48 @@ function selectList(columns: string[]): string {
   return Array.from(new Set(columns)).join(",");
 }
 
+/**
+ * A field's CSV cell. Missing values, and readings whose valid_sample_mask bit
+ * is clear, are exported empty — never as a 0, which a spreadsheet would
+ * average in with real measurements. Times are written the way the table
+ * shows them.
+ */
+function csvCell(field: PayloadFieldDef) {
+  return (row: PayloadRow): string => {
+    const value = columnValue(row, field.key);
+    if (value === null || value === undefined) return "";
+    if (!isReadingValid(row, field)) return "";
+    switch (field.kind) {
+      case "timestamp":
+        return formatCreatedAt(String(value));
+      case "errorMask":
+        return typeof value === "number" ? formatErrorMask(value) : String(value);
+      case "sampleTime": {
+        // Status flags bit 5: UTC epoch (written as ISO 8601, so a spreadsheet
+        // sorts it) or seconds since boot, which has no absolute meaning.
+        const flags = columnValue(row, "status_flags");
+        if (typeof value === "number" && typeof flags === "number") {
+          return (flags & STATUS_FLAG_TIME_UTC) !== 0
+            ? new Date(value * 1000).toISOString()
+            : `uptime ${value} s`;
+        }
+        return String(value);
+      }
+      default:
+        return String(value);
+    }
+  };
+}
+
+/** One CSV column per field, in field order: the export follows the table. */
+function csvColumnsFor(fields: PayloadFieldDef[]): CsvColumn[] {
+  return fields.map((field) => ({
+    key: field.key,
+    label: fieldLabel(field),
+    value: csvCell(field),
+  }));
+}
+
 /* ------------------------------------------------------- development schema */
 
 const DEVELOPMENT_FIELDS: PayloadFieldDef[] = [
@@ -290,6 +335,7 @@ const DEVELOPMENT_FIELDS: PayloadFieldDef[] = [
   { key: "reporting_counter", label: "Counter", kind: "integer", group: "Report", protocolType: "uint32", description: "Monotonic report counter." },
   { key: "byte_length", label: "Bytes", kind: "integer", unit: "B", group: "Report", description: "Total received length in bytes." },
   { key: "source_ip", label: "Source IP", kind: "mono", group: "Report", description: "Address the payload was received from." },
+  { key: "payload_hex", label: "Payload hex", kind: "mono", group: "Report", description: "The received frame, byte for byte, in hexadecimal." },
   // The first sample's channels (a V1 report carries one), then the context.
   ...V1_SAMPLE_COLUMN_FIELDS,
   ...V1_CONTEXT_COLUMN_FIELDS,
@@ -331,7 +377,7 @@ export const DEVELOPMENT_SCHEMA: PayloadSchema = {
     // Original schema only.
     selectList(BASE_SUMMARY_COLUMNS),
   ],
-  csvColumns: CSV_COLUMNS,
+  csvColumns: csvColumnsFor(DEVELOPMENT_FIELDS),
   csvBasename: "payloads",
   capabilities: {
     rawPayloadInspector: true,
@@ -365,24 +411,6 @@ const REE_SENSOR_KEYS = V1_SAMPLE_COLUMN_FIELDS.filter((field) => field.chartabl
   (field) => field.key,
 );
 
-// A cell for the CSV export. A reading whose valid_sample_mask bit is clear is
-// exported empty, never as the 0 the device transmitted: a spreadsheet would
-// otherwise average "no measurement" in with real ones.
-function reeCell(field: PayloadFieldDef) {
-  return (row: PayloadRow): string => {
-    const value = columnValue(row, field.key);
-    if (value === null || value === undefined) return "";
-    if (!isReadingValid(row, field)) return "";
-    return String(value);
-  };
-}
-
-const REE_CSV_COLUMNS: CsvColumn[] = REE_FIELDS.map((field) => ({
-  key: field.key,
-  label: field.unit ? `${field.label} (${field.unit})` : field.label,
-  value: reeCell(field),
-}));
-
 export const REE_SCHEMA: PayloadSchema = {
   id: "ree",
   table: ENVIRONMENT_CONFIG.REE.payloadTable,
@@ -409,7 +437,7 @@ export const REE_SCHEMA: PayloadSchema = {
     // A table without them still charts the sensor channels.
     selectList(["created_at", "reporting_counter", "valid_sample_mask", ...REE_SENSOR_KEYS]),
   ],
-  csvColumns: REE_CSV_COLUMNS,
+  csvColumns: csvColumnsFor(REE_FIELDS),
   csvBasename: "payloads-ree",
   capabilities: {
     rawPayloadInspector: false,
