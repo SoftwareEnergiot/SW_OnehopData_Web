@@ -71,6 +71,11 @@ describe("schema selection", () => {
     expect(DEVELOPMENT_SCHEMA.capabilities.errorMask).toBe(true);
   });
 
+  it("offers remote config in Development only", () => {
+    expect(DEVELOPMENT_SCHEMA.capabilities.remoteConfig).toBe(true);
+    expect(REE_SCHEMA.capabilities.remoteConfig).toBe(false);
+  });
+
   it("declares a REE column for every V1 context field", () => {
     for (const { key, type } of V1_CONTEXT_FIELDS) {
       const field = fieldOf(REE_SCHEMA, key);

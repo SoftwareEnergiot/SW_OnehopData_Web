@@ -19,6 +19,7 @@ import {
   type PayloadAnalysis,
 } from "@/lib/payload-decoder";
 import { formatCreatedAt } from "@/lib/utils";
+import { describePollStatus, formatCrc32 } from "@/lib/remote-config";
 import {
   describeCommError,
   describeResetSource,
@@ -73,13 +74,11 @@ export function describeContextValue(
     case "status_flags":
       return resolveStatusFlags(value, hasSampleTime).join(", ");
     case "config_crc32":
-      // Reserved for remote configuration: always 0 until polling exists.
-      return value === 0
-        ? "not available (always 0 until polling is implemented)"
-        : `0x${(value >>> 0).toString(16).padStart(8, "0")}`;
+      // Line 10 of the config file the device runs, as the Remote config tab
+      // shows it.
+      return formatCrc32(value);
     case "last_poll_status":
-      // Reserved for remote configuration; only 0 is defined so far.
-      return value === 0 ? "no poll since boot" : "value not defined yet";
+      return describePollStatus(value);
     case "reset_source":
       return describeResetSource(value);
     case "rsrp":

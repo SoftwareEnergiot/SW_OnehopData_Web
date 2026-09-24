@@ -15,7 +15,10 @@ Two formats are supported, dispatched on the **version byte at offset 0**:
 | **V1** (current) | [Confluence — V1](https://energiot.atlassian.net/wiki/spaces/WSNFD/pages/670793729/V1) | 93 bytes | yes |
 | **V0** (legacy)  | *Payload Encode - LoraWAN V0* | `10 + 28 · N` bytes | no |
 
-V0 stays supported so already-deployed devices keep working.
+**Only the current V1 (93 bytes, with device UID) is accepted for storage.** A
+frame in any other format — V0, or the earlier 82/86-byte V1 revisions —
+still decodes (so stored rows and the Playground can show it) but is
+discarded with a `400`. Every stored payload therefore carries a device UID.
 
 It is built with the same stack and conventions as the reference Sensor Data
 Platform: **Next.js (App Router) + TypeScript (strict) + Tailwind CSS v4 +
@@ -77,9 +80,23 @@ either environment.
 | Detail inspector | binary-vs-hex + field-by-field decode of the stored frame | field-by-field from the stored columns: sensors, batch context, error mask and valid-sample mask |
 | Payload-size chart | yes | no — `payloads_REE` has no `byte_length` |
 | Battery / coverage charts | yes | yes |
-| Sensor-channel charts (temperature, humidity, luminosity, acceleration, magnetic field) | — (each series already has its own chart) | yes, pick any of the 14 channels |
+| Table columns: pick any column, save the view | yes | yes |
+| Timeline charts: pick any built-in chart or numeric column, save the view | yes | yes |
 | Error-mask decoding | yes | yes |
 | Writes from the Playground | yes | yes, one row per sample |
+| Remote config tab | yes | no — the REE devices are not configured remotely |
+
+### Saved views
+
+The *Received payloads* table and the *Reception timeline* each have a picker
+(**Columns** / **Charts**) offering every column of the environment's table,
+plus the built-in reception, size, counter, battery and coverage charts. The
+selection applies at once; **Save view** keeps it in this browser's
+`localStorage`, per environment, and **Reset to default** forgets it. The
+defaults, in both environments:
+
+- table: *Received*, *Device UID*, *Error mask*, *Counter*;
+- charts: *Battery state of charge*.
 
 **REE stores the batch context one column per field.** The 17 V1 context
 fields (`error_mask`, `last_communication_error`, `battery_soc`,
@@ -239,27 +256,24 @@ shows **"No environments available."** and REE looks permanently empty.
 
 ### Where each V1 field is stored
 
-| Field | Storage |
+Both tables have **one column per V1 field**, with the same names, units and
+scale. `payloads_REE` has them natively; `public.payloads` gets them as
+**generated columns** read from the `samples` / `context` JSONB it already
+stores:
+
+| Field | `public.payloads` |
 | ----- | ------- |
 | `payload_version`, `sample_count`, `reporting_counter`, `error_mask`, `errors`, `byte_length` | Columns (pre-existing) |
 | `device_uid` | Column (script `003`) |
-| `battery_soc`, `battery_voltage`, `rsrp`, `snr`, `last_communication_error` | Generated columns (script `004`) **and** `context` |
-| `reporting_lost_counter`, `tx_failed` | Generated columns (script `005`) **and** `context` |
-| The 16 sample channels, `time` and `valid_sample_mask` included | `samples` JSONB |
-| `config_crc32`, `boot_count`, `reset_source`, `status_flags`, `tau`, `active_time`, `last_attach_duration_ms`, `last_tx_duration_ms`, `last_poll_status` | `context` JSONB only |
+| `battery_soc`, `battery_voltage`, `rsrp`, `snr`, `last_communication_error` | Generated (script `004`) |
+| every other context field, `reporting_lost_counter` and `tx_failed` included | Generated (script `008`) |
+| `sample_time` and the 15 channels of the first sample, as engineering values (°C, %RH) | Generated (script `008`) |
 
-The sample-time revision needs **no schema change**: `time` lands in `samples`
-and the new context fields in `context`. Every generated column from `004` and
-`005` reads a key whose name did not change, so they keep working.
-
-Nothing is dropped: every decoded field reaches the database. The JSONB-only
-fields are simply not indexed or typed — query them with `context->>'field'`, or
-promote one to a generated column by copying a line from script `004`.
-
-Script `005` does the same for the two counters added by the V1 context revision
-(36 → 40 bytes). Like `004` it is **optional and not deployment-order
-sensitive**: both fields already reach the database inside `context` as soon as
-the decoder understands them, and the script only makes them cheap to query.
+Script `008_payloads_v1_columns.sql` (in the Supabase scripts) also carries the
+two columns of `005`, which had never been run against the database. It is
+**not deployment-order sensitive**: nothing writes these columns, existing rows
+are filled when they are added, V0 rows get `NULL`, and until it runs the new
+columns just show empty.
 
 ### Reading the V1 counters and the battery
 
@@ -295,7 +309,9 @@ npm run dev      # http://localhost:3000
 - Preferred `Content-Type: application/octet-stream`.
 - The body is read with `request.arrayBuffer()` and is **never** parsed as JSON.
 - **The response has no body** — the HTTP status is the entire answer: `204`
-  accepted, `400` decode failure, `415` unreadable body, `500` unexpected error.
+  accepted, `400` decode failure **or a format other than the current V1**
+  (V0, older V1 revisions, no UID), `415` unreadable body, `500` unexpected
+  error.
   Read the decoded payloads back with `GET /api/payloads` or in the dashboard.
   See [docs/api-payloads-ingest.md](docs/api-payloads-ingest.md) for the full
   endpoint contract.
@@ -309,8 +325,7 @@ same list the database restricts `payloads_REE` inserts to.
 
 - **UID listed** → the report is stored in `public."payloads_REE"`, one row per
   sample.
-- **Anything else** — a different device, or a V0 payload that carries no UID →
-  `public.payloads`, exactly as before.
+- **Any other device** → `public.payloads`.
 
 > The list lives in code, not in the table. Reading the reference UID back from
 > `payloads_REE` made routing depend on the table it is meant to fill: while it
@@ -336,17 +351,6 @@ echo -n "0100124B001A2B3C4D012A000000A068AA6AEB00F100DC00DF00BC008C02D7009001E20
       -H "Content-Type: application/octet-stream" \
       --data-binary @-
 # → 204
-```
-
-### Example (curl) — V0
-
-```bash
-# The canonical example payload from the V0 protocol document (150 bytes, 5 samples).
-echo -n "0005BB00DA00D700BC008C020000000000000000C60016FD100200000000BB00BA00D700BC008C020000000000000000C60016FD110200000000BB00DA00D700BC008C020000000000000000C70016FD100200000000BA00DA00D700BC008C020000000000000000C60016FD110200000000BA00DA00D700BC008B020000000000000000C60016FD1102000000001800000000000000" \
-  | xxd -r -p \
-  | curl -s -X POST http://localhost:3000/api/payloads \
-      -H "Content-Type: application/octet-stream" \
-      --data-binary @- | jq
 ```
 
 ### Reading the decode back
@@ -402,6 +406,74 @@ The V1 example payload above decodes to:
 
 > Values are the **raw** integers. Apply `value / factor` for the engineering
 > value (`thermocouple_1: 235` → `23.5 °C`).
+
+---
+
+## Remote config
+
+The **Remote config** tab edits, per device, the configuration file the device
+downloads from `GET /api/config`. It exists in the **Development** environment
+only (`capabilities.remoteConfig` in the schema): REE hides the tab, and the
+dashboard endpoints answer `403` for REE or for a device whose reports are
+routed to `payloads_REE`. The user edits JSON; the device only ever
+sees the plain-text v0 file. Everything about the format lives in
+[`lib/remote-config.ts`](lib/remote-config.ts), shared by the editor's live
+validation and the server, which validates every save again.
+
+### The v0 file
+
+Ten ASCII lines separated by LF (never CRLF), with a LF after the last one:
+version `0`, `reporting_url`, `reporting_path`, `polling_url`, `polling_path`,
+`apn`, an always-empty `api_key` ("keep the key"), `reporting_interval_ms`,
+`polling_interval_ms`, and the CRC-32/ISO-HDLC (zlib) of lines 1–9 — including
+the LF closing line 9 — as 8 uppercase hex digits. The test vector in
+[`lib/remote-config.test.ts`](lib/remote-config.test.ts) is the template, 105
+bytes, CRC `2442F46C`.
+
+The JSON must have exactly the seven keys, none null; hosts are bare names
+(`[A-Za-z0-9.-]`, 1–255, always HTTPS on 443); paths 1–127 printable characters
+starting with `/`, no spaces, `#` or `://`; `apn` is `auto` or 1–63
+`[A-Za-z0-9.-]`. Reporting runs 1 min – 6 h and polling 3 h – 24 h; the per-device
+**Lab limits (Debug firmware)** option relaxes both to 1 s – 24 h, for bench tests
+only.
+
+### `GET /api/config` (called by the device)
+
+| Status | When |
+| ------ | ---- |
+| `200` | a config is saved: the exact file, `text/plain; charset=us-ascii` |
+| `204` | the token is known but no config is saved: the device keeps its own |
+| `401` | no `Authorization` header, or an unknown token |
+| `500` | anything else |
+
+Every answer is `Cache-Control: no-store`. The firmware does not follow
+redirects, so it must call `/api/config` exactly: `/api/config/` is a 308.
+
+The request has no body, so the device is identified by its Bearer token. The
+application learns token → device UID from the reports it POSTs to
+`/api/payloads`, which carry both. It stores only the token's SHA-256, keeps
+the first pairing seen for a token, and never logs the header. A device
+therefore gets `401` until its first report after this is deployed.
+
+### Tables
+
+`device_config` (one row per device, the saved config plus its generated file
+and CRC) and `device_api_key` (token hash → device UID), reached with the anon
+key like `payloads`: public read and insert, plus update on `device_config`.
+This is a debug platform, so that is deliberate, but it means anyone holding
+the (public) anon key can edit a device's config — and with it the server the
+device polls — without going through the dashboard. The SQL is
+`007_remote_config.sql` in the Supabase scripts.
+
+### States in the tab
+
+The devices listed are the ones that have reported to Development.
+For each one the tab compares the `config_crc32` of its newest payload with the
+saved file's CRC: **Applied** when they match, **Pending** when a config is
+saved and they don't, **No remote config** when nothing is saved. The device
+tries a new file, confirms it after one good report and poll, and reverts it
+after three failures (`last_poll_status` 8), so Applied can turn back into
+Pending.
 
 ---
 

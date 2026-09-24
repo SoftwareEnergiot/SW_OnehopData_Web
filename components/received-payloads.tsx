@@ -34,6 +34,8 @@ import { PayloadRecordView } from "@/components/payload-record-view";
 import { PayloadCharts } from "@/components/payload-charts";
 import { PayloadCell, isNumericField } from "@/components/payload-cell";
 import { useActiveEnvironment } from "@/components/environment-provider";
+import { useSavedView } from "@/components/use-saved-view";
+import { ViewPicker } from "@/components/view-picker";
 import { analyzePayload, hexToBytes } from "@/lib/payload-decoder";
 import { createdAtBoundFromInput, formatCreatedAt } from "@/lib/utils";
 import { buildCsv, downloadCsv } from "@/lib/payload-csv";
@@ -54,6 +56,7 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Columns3,
   Database,
   Download,
   RefreshCw,
@@ -79,13 +82,16 @@ export function ReceivedPayloads() {
     [schema],
   );
 
-  // The columns of the list, resolved from the schema's field metadata.
+  // The columns of the list: any field of the schema, as the reader picked
+  // them (saved per environment in this browser), or the schema's defaults.
+  const fieldKeys = useMemo(() => schema.fields.map((field) => field.key), [schema]);
+  const columnsView = useSavedView(schema.id, "columns", fieldKeys, schema.listColumns);
   const listFields = useMemo(
     () =>
-      schema.listColumns
+      columnsView.selected
         .map((key) => fieldOf(schema, key))
         .filter((field): field is NonNullable<typeof field> => field !== undefined),
-    [schema],
+    [schema, columnsView.selected],
   );
 
   const [rows, setRows] = useState<PayloadRow[]>([]);
@@ -466,11 +472,33 @@ export function ReceivedPayloads() {
           </CardTitle>
           <CardAction>
             <div className="flex flex-wrap items-center gap-2">
+              <ViewPicker
+                trigger={
+                  <>
+                    <Columns3 className="h-4 w-4" />
+                    Columns
+                  </>
+                }
+                title="Table columns"
+                items={schema.fields.map((field) => ({
+                  key: field.key,
+                  label: fieldLabel(field),
+                  group: field.group,
+                }))}
+                selected={columnsView.selected}
+                onToggle={columnsView.toggle}
+                onSelectAll={() => columnsView.setSelected(fieldKeys)}
+                onClear={() => columnsView.setSelected([])}
+                onSave={columnsView.save}
+                onReset={columnsView.reset}
+                unsaved={columnsView.unsaved}
+                hasSavedView={columnsView.hasSavedView}
+              />
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="sm" className="gap-2">
                     <SlidersHorizontal className="h-4 w-4" />
-                    Columns
+                    CSV columns
                     <span className="text-xs text-muted-foreground">
                       ({selectedColumns.size}/{schema.csvColumns.length})
                     </span>

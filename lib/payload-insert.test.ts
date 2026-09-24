@@ -5,7 +5,11 @@ import {
   analyzePayload,
   hexToBytes,
 } from "@/lib/payload-decoder";
-import { PayloadInsertError, rowsForSchema } from "@/lib/payload-insert";
+import {
+  PayloadInsertError,
+  rowsForSchema,
+  unsupportedFormat,
+} from "@/lib/payload-insert";
 import { DEVELOPMENT_SCHEMA, REE_SCHEMA } from "@/lib/payload-schemas";
 import { canonicalUid } from "@/lib/payload-repository";
 
@@ -126,5 +130,24 @@ describe("canonicalUid", () => {
     expect(canonicalUid("")).toBeNull();
     expect(canonicalUid(null)).toBeNull();
     expect(canonicalUid(undefined)).toBeNull();
+  });
+});
+
+describe("unsupportedFormat", () => {
+  it("accepts the current V1 format", () => {
+    expect(unsupportedFormat(analyse(V1_EXAMPLE_HEX))).toBeNull();
+  });
+
+  it("discards a V0 payload, which carries no device UID", () => {
+    expect(unsupportedFormat(analyse(V0_EXAMPLE_HEX))).toMatch(/Only the current V1 format/);
+  });
+
+  it("discards the earlier 82-byte V1 revision", () => {
+    // Current V1 minus the sample time (4 B) and the context added since (7 B).
+    const legacy = analyse(
+      V1_EXAMPLE_HEX.slice(0, 28) + V1_EXAMPLE_HEX.slice(36, 28 + 72) + V1_EXAMPLE_HEX.slice(28 + 72, 28 + 72 + 72),
+    );
+    expect(legacy.decoded.layout_revision).toBe("v1-82");
+    expect(unsupportedFormat(legacy)).toMatch(/Only the current V1 format/);
   });
 });

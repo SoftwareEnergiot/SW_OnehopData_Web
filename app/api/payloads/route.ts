@@ -13,7 +13,12 @@ import {
   environmentForDeviceUid,
   resolveEnvironment,
 } from "@/lib/payload-repository";
-import { PayloadInsertError, rowsForSchema } from "@/lib/payload-insert";
+import {
+  PayloadInsertError,
+  rowsForSchema,
+  unsupportedFormat,
+} from "@/lib/payload-insert";
+import { learnDeviceToken, parseBearerToken } from "@/lib/device-auth";
 import { NextRequest, NextResponse } from "next/server";
 
 // Raw binary bodies require the Node.js runtime (not the Edge runtime) so the
@@ -44,15 +49,16 @@ function requestedEnvironment(request: NextRequest) {
  * POST /api/payloads[?environment=<name>]
  *
  * Receives a raw binary Onehop payload (preferably
- * `Content-Type: application/octet-stream`), decodes it — V0 and V1 are both
- * accepted, dispatched on the version byte — and stores it in the selected
- * environment's table.
+ * `Content-Type: application/octet-stream`), decodes it and stores it in the
+ * selected environment's table. Only the current V1 format is accepted: V0 and
+ * the earlier V1 revisions still decode, but are discarded with a 400
+ * (`unsupportedFormat` in lib/payload-insert), so every stored payload carries
+ * a device UID.
  *
  * Devices send no `environment`, and the endpoint then picks the table from the
  * payload itself: a decoded device UID listed in the REE schema's
- * `writeDeviceUids` stores the payload in `payloads_REE`. Anything else
- * — a different device, or a V0 payload that carries no UID at all — is stored
- * in `public.payloads`, which is where every payload has always landed. A
+ * `writeDeviceUids` stores the payload in `payloads_REE`; any other device is
+ * stored in `public.payloads`. A
  * storage failure on that path stays best-effort, as it always has: the payload
  * decoded, so the request is still accepted with 204 and no body.
  *
@@ -87,8 +93,31 @@ export async function POST(request: NextRequest) {
       throw error;
     }
 
+    // Only the current V1 format is stored. Anything else decoded but is
+    // discarded with a 400, so the sender knows the frame was not kept.
+    const rejection = unsupportedFormat(analysis);
+    if (rejection) {
+      console.error("Payload discarded:", rejection);
+      return explicitEnvironment
+        ? NextResponse.json(
+            { success: false, error: "UNSUPPORTED_FORMAT", details: rejection },
+            { status: 400 },
+          )
+        : new NextResponse(null, { status: 400 });
+    }
+
     try {
       const supabase = await createClient();
+
+      // A device's report carries both its Bearer token and its UID: remember
+      // the pairing, so GET /api/config can tell which device is polling. Only
+      // the token's hash is stored, and this never throws or changes the
+      // answer below.
+      const token = parseBearerToken(request.headers.get("authorization"));
+      if (token) {
+        await learnDeviceToken(supabase, token, analysis.decoded.device_uid);
+      }
+
       const named = new URL(request.url).searchParams.get(ENVIRONMENT_PARAM);
       // Named explicitly -> honour it. Unaddressed -> route on the device UID.
       const target =

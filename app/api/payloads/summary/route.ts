@@ -28,17 +28,14 @@ const MAX_POINTS = 20000;
  * always narrow: the whole range ships in one response and every extra column
  * is paid for on every payload.
  *
- * Development asks for reception time, byte size, reporting counter, the error
- * mask and the V1 battery / radio diagnostics. The diagnostic columns are
- * generated from `context` by scripts/004 and scripts/005; a database missing
- * one of those migrations does not have them at all, so the schema lists
- * progressively smaller column sets and the query walks down until one is
- * accepted — a database missing only the newest migration keeps every chart it
- * can still serve.
- *
- * REE asks for reception time, the reporting counter, the valid-sample mask,
- * the sensor channels and the battery / radio / reporting-loss context columns.
- * A table without the context columns falls back to the sensors alone.
+ * Both environments ask for reception time, the reporting counter, the error
+ * mask, the valid-sample mask, the battery / radio / reporting-loss columns and
+ * every chartable column (Development adds the byte size). In Development most
+ * of those are generated from `samples` / `context` by scripts/004 and 008; a
+ * database missing one of those migrations does not have them at all, so the
+ * schema lists progressively smaller column sets and the query walks down until
+ * one is accepted — the charts it can still serve keep working. A REE table
+ * without the context columns falls back to the sensors alone.
  *
  * Query: `from` / `to` (optional, inclusive bounds on `created_at`), and
  * `device_uid` (optional; same rules as GET /api/payloads). Charting one device
