@@ -340,13 +340,260 @@ describe("V1 validation", () => {
 
   it("still rejects an unknown version", () => {
     const bytes = hexToBytes(V1_EXAMPLE_HEX);
-    bytes[0] = 2; // v2 is documented but not implemented yet
+    bytes[0] = 3;
     try {
       decodePayload(bytes);
       expect.unreachable();
     } catch (e) {
       expect((e as PayloadDecodeError).code).toBe("UNSUPPORTED_VERSION");
     }
+  });
+});
+
+// The V2 reference vector (N = 1, 97 bytes): the V1 example with version 2 and
+// the power stage appended to the context.
+const V2_HEADER_HEX = "0200124B001A2B3C4D012A000000";
+const V2_POWER_HEX = "D4300803"; // vin_mv 12500, uvlos_mask 8, power_flags 0x03
+const V2_EXAMPLE_HEX = V2_HEADER_HEX + V1_SAMPLE_HEX + V1_CONTEXT_HEX + V2_POWER_HEX;
+
+// Context offset of the power stage bytes in a one-sample V2 frame.
+const V2_UVLOS_AT = 14 + 36 + 45;
+const V2_POWER_FLAGS_AT = 14 + 36 + 46;
+
+function decodeCode(bytes: Uint8Array): string {
+  try {
+    decodePayload(bytes);
+  } catch (e) {
+    return (e as PayloadDecodeError).code;
+  }
+  return "decoded";
+}
+
+describe("decodePayload — V2 reference vector", () => {
+  const bytes = hexToBytes(V2_EXAMPLE_HEX);
+  const decoded = decodePayload(bytes);
+
+  it("is 97 bytes and reads as V2", () => {
+    expect(bytes).toHaveLength(97);
+    expect(decoded.payload_version).toBe(2);
+    expect(decoded.layout_revision).toBe("v2");
+  });
+
+  it("decodes the header", () => {
+    expect(decoded.device_uid).toBe("00:12:4B:00:1A:2B:3C:4D");
+    expect(decoded.sample_count).toBe(1);
+    expect(decoded.reporting_counter).toBe(42);
+  });
+
+  it("decodes the sample exactly as V1 does", () => {
+    const v1 = decodePayload(hexToBytes(V1_EXAMPLE_HEX));
+    expect(decoded.samples).toEqual(v1.samples);
+    expect(decoded.samples[0]).toMatchObject({
+      time: 1789552800,
+      thermocouple_1: 235,
+      thermocouple_2: 241,
+      current_1_int_temp: 220,
+      current_2_int_temp: 223,
+      ambient_temperature: 188,
+      ambient_humidity: 652,
+      internal_temperature: 215,
+      internal_humidity: 400,
+      luminosity: 1250,
+      acceleration_x: 198,
+      acceleration_y: -746,
+      acceleration_z: 528,
+      magnetic_field_1: 1500,
+      magnetic_field_2: 1480,
+      valid_sample_mask: 0x017f,
+    });
+    expect(sampleInstant(decoded, decoded.samples[0])?.toISOString()).toBe(
+      "2026-09-16T10:00:00.000Z",
+    );
+  });
+
+  it("decodes C+0..C+42 as V1, then the three power-stage bytes raw", () => {
+    expect(decoded.context).toEqual({
+      error_mask: 0x18,
+      last_communication_error: 0,
+      battery_soc: 87,
+      battery_voltage: 4012,
+      config_crc32: 0x89abcdef,
+      boot_count: 12,
+      reset_source: 2,
+      rsrp: -95,
+      snr: 8,
+      status_flags: 0xb7,
+      tau: 43200,
+      active_time: 2,
+      last_attach_duration_ms: 8200,
+      last_tx_duration_ms: 4500,
+      reporting_lost_counter: 2,
+      tx_failed: 5,
+      last_poll_status: 0,
+      vin_mv: 12500,
+      uvlos_mask: 8,
+      power_flags: 0x03,
+      reporting_counter: 42,
+    });
+    expect(decoded.sample_time_utc).toBe(true);
+    expect(decoded.errors.map((e) => e.name)).toEqual([
+      "ERR_RSN_SENSOR_HALL_EFFECT_1",
+      "ERR_RSN_SENSOR_HALL_EFFECT_2",
+    ]);
+  });
+
+  it("decodes the power stage", () => {
+    expect(decoded.power).toEqual({
+      vin_mv: 12500,
+      uvlos_mask: 8,
+      uvlos_rising_v: 12,
+      uvlos_window: "short",
+      supercaps_connected: true,
+      eh_active: true,
+    });
+  });
+
+  it("annotates the 97 bytes into 14/36/47 sections", () => {
+    const analysis = analyzePayload(bytes);
+    expect(analysis.meta.expectedLength).toBe(97);
+    expect(expectedLength(1, 2)).toBe(97);
+    expect(expectedLength(5, 2)).toBe(241);
+    expect(analysis.meta.contextSize).toBe(47);
+    expect(analysis.bytes[49].section).toBe("sample");
+    expect(analysis.bytes[50].section).toBe("context");
+    expect(analysis.bytes[96].section).toBe("context");
+  });
+});
+
+describe("V2 validation", () => {
+  it("rejects 96 and 98 bytes with N = 1", () => {
+    expect(decodeCode(hexToBytes(V2_EXAMPLE_HEX.slice(0, -2)))).toBe("INVALID_LENGTH");
+    expect(decodeCode(hexToBytes(V2_EXAMPLE_HEX + "00"))).toBe("INVALID_LENGTH");
+  });
+
+  it("rejects a V1-length frame carrying version 2", () => {
+    expect(decodeCode(hexToBytes("02" + V1_EXAMPLE_HEX.slice(2)))).toBe("INVALID_LENGTH");
+  });
+
+  it("accepts N from 1 to 5, at exactly 61 + 36N bytes", () => {
+    for (let n = 1; n <= 5; n++) {
+      const hex =
+        "0200124B001A2B3C4D" +
+        n.toString(16).padStart(2, "0") +
+        "2A000000" +
+        V1_SAMPLE_HEX.repeat(n) +
+        V1_CONTEXT_HEX +
+        V2_POWER_HEX;
+      const decoded = decodePayload(hexToBytes(hex));
+      expect(hexToBytes(hex)).toHaveLength(61 + 36 * n);
+      expect(decoded.samples).toHaveLength(n);
+      expect(decoded.power?.vin_mv).toBe(12500);
+    }
+  });
+
+  it("rejects N = 0 and N = 6 even when the length agrees", () => {
+    const frame = (n: number) =>
+      hexToBytes(
+        "0200124B001A2B3C4D" +
+          n.toString(16).padStart(2, "0") +
+          "2A000000" +
+          V1_SAMPLE_HEX.repeat(n) +
+          V1_CONTEXT_HEX +
+          V2_POWER_HEX,
+      );
+    expect(decodeCode(frame(0))).toBe("SAMPLE_COUNT_MISMATCH");
+    expect(decodeCode(frame(6))).toBe("SAMPLE_COUNT_MISMATCH");
+  });
+
+  it("rejects a header N that disagrees with the length", () => {
+    const bytes = hexToBytes(V2_EXAMPLE_HEX);
+    bytes[9] = 2;
+    expect(decodeCode(bytes)).toBe("SAMPLE_COUNT_MISMATCH");
+  });
+});
+
+describe("V2 power stage", () => {
+  const withByte = (at: number, value: number) => {
+    const bytes = hexToBytes(V2_EXAMPLE_HEX);
+    bytes[at] = value;
+    return decodePayload(bytes);
+  };
+
+  it("reads uvlos_mask 0xFF as unknown, raw byte kept in the context", () => {
+    const decoded = withByte(V2_UVLOS_AT, 0xff);
+    expect(decoded.context.uvlos_mask).toBe(0xff);
+    expect(decoded.power).toMatchObject({
+      uvlos_mask: null,
+      uvlos_rising_v: null,
+      uvlos_window: null,
+    });
+    // The other readings are unaffected.
+    expect(decoded.power?.vin_mv).toBe(12500);
+    expect(decoded.power?.supercaps_connected).toBe(true);
+  });
+
+  it("reads power_flags 0xC0 as both states unknown, not false", () => {
+    const decoded = withByte(V2_POWER_FLAGS_AT, 0xc0);
+    expect(decoded.power?.supercaps_connected).toBeNull();
+    expect(decoded.power?.eh_active).toBeNull();
+  });
+
+  it("keeps each power_flags state independent of the other's failure", () => {
+    expect(withByte(V2_POWER_FLAGS_AT, 0x40 | 0x03).power).toMatchObject({
+      supercaps_connected: null,
+      eh_active: true,
+    });
+    expect(withByte(V2_POWER_FLAGS_AT, 0x80 | 0x01).power).toMatchObject({
+      supercaps_connected: true,
+      eh_active: null,
+    });
+    // A clear bit with no failure is a real "no".
+    expect(withByte(V2_POWER_FLAGS_AT, 0x00).power).toMatchObject({
+      supercaps_connected: false,
+      eh_active: false,
+    });
+  });
+
+  it("ignores the reserved power_flags bits 2-5", () => {
+    expect(withByte(V2_POWER_FLAGS_AT, 0x3c | 0x03).power).toMatchObject({
+      supercaps_connected: true,
+      eh_active: true,
+    });
+  });
+
+  it("reads vin_mv 0 as a failed read", () => {
+    const bytes = hexToBytes(V2_EXAMPLE_HEX);
+    bytes[14 + 36 + 43] = 0;
+    bytes[14 + 36 + 44] = 0;
+    expect(decodePayload(bytes).power?.vin_mv).toBeNull();
+  });
+
+  it("does not decode a uvlos_mask with the always-zero bits set", () => {
+    const decoded = withByte(V2_UVLOS_AT, 0x18);
+    expect(decoded.power?.uvlos_mask).toBe(0x18);
+    expect(decoded.power?.uvlos_rising_v).toBeNull();
+    expect(decoded.power?.uvlos_window).toBeNull();
+  });
+
+  it("is absent from V1 and V0 payloads", () => {
+    expect(decodePayload(hexToBytes(V1_EXAMPLE_HEX)).power).toBeNull();
+    expect(decodePayload(hexToBytes(EXAMPLE_HEX)).power).toBeNull();
+  });
+});
+
+describe("V1 alongside V2", () => {
+  it("decodes the V1 example exactly as before", () => {
+    const decoded = decodePayload(hexToBytes(V1_EXAMPLE_HEX));
+    expect(decoded.layout_revision).toBe("v1");
+    expect(decoded.context).not.toHaveProperty("vin_mv");
+    expect(Object.keys(decoded.context)).toHaveLength(18);
+  });
+
+  it("still accepts a V1 frame of more than five samples", () => {
+    // The 1..5 bound is V2's; V1 is left as it was.
+    const sixSamples =
+      "0100124B001A2B3C4D062A000000" + V1_SAMPLE_HEX.repeat(6) + V1_CONTEXT_HEX;
+    expect(decodePayload(hexToBytes(sixSamples)).samples).toHaveLength(6);
   });
 });
 
@@ -365,6 +612,7 @@ describe("version dispatch", () => {
   it("sizes each version correctly", () => {
     expect(expectedLength(5, 0)).toBe(150);
     expect(expectedLength(1, 1)).toBe(93);
+    expect(expectedLength(1, 2)).toBe(97);
     // Callers written before the format became version-dependent still get V0.
     expect(expectedLength(5)).toBe(150);
   });

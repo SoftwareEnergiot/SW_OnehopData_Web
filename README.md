@@ -8,17 +8,20 @@ stores both the raw and decoded forms in Supabase, and the dashboard renders a
 binary-vs-hexadecimal comparison plus a full field-by-field deconstruction
 (header, samples, batch context, and error mask).
 
-Two formats are supported, dispatched on the **version byte at offset 0**:
+Three formats are supported, dispatched on the **version byte at offset 0**
+(any other version is rejected with `400`):
 
 | Version | Document | Total length | Device UID |
 | ------- | -------- | ------------ | ---------- |
-| **V1** (current) | [Confluence — V1](https://energiot.atlassian.net/wiki/spaces/WSNFD/pages/670793729/V1) | 93 bytes | yes |
+| **V2** (current) | V1 plus the power stage | `61 + 36 · N` bytes, N = 1–5 (97 for N = 1) | yes |
+| **V1** (current) | [Confluence — V1](https://energiot.atlassian.net/wiki/spaces/WSNFD/pages/670793729/V1) | `57 + 36 · N` bytes (93 for N = 1) | yes |
 | **V0** (legacy)  | *Payload Encode - LoraWAN V0* | `10 + 28 · N` bytes | no |
 
-**Only the current V1 (93 bytes, with device UID) is accepted for storage.** A
-frame in any other format — V0, or the earlier 82/86-byte V1 revisions —
-still decodes (so stored rows and the Playground can show it) but is
-discarded with a `400`. Every stored payload therefore carries a device UID.
+**The current V1 and V2 are accepted for storage** — during the firmware
+transition devices send either, and both are stored side by side. A frame in
+any other format — V0, or the earlier 82/86-byte V1 revisions — still decodes
+(so stored rows and the Playground can show it) but is discarded with a `400`.
+Every stored payload therefore carries a device UID.
 
 It is built with the same stack and conventions as the reference Sensor Data
 Platform: **Next.js (App Router) + TypeScript (strict) + Tailwind CSS v4 +
@@ -105,14 +108,17 @@ fields (`error_mask`, `last_communication_error`, `battery_soc`,
 `status_flags`, `tau`, `active_time`, `last_attach_duration_ms`,
 `last_tx_duration_ms`, `reporting_lost_counter`, `tx_failed`,
 `last_poll_status`) each have a `payloads_REE` column of the same name, holding
-the raw value. The REE devices' V1 format is frozen, so the columns are fixed.
-Rows stored before the columns were added have them all `NULL`: those values
-were never kept, and the raw frame is not stored. With `status_flags` present,
-the inspector also says whether `sample_time` is UTC or uptime.
+the raw value. Rows stored before the columns were added have them all `NULL`:
+those values were never kept, and the raw frame is not stored. With
+`status_flags` present, the inspector also says whether `sample_time` is UTC or
+uptime. A V2 report adds the six power-stage columns (see
+[The V2 power stage](#the-v2-power-stage)); they are `NULL` on V1 rows.
 
 > **The columns must exist before the code that writes them is deployed.** The
 > REE insert names every context column, so against a table without them every
-> device report is rejected and lost (the device still gets `204`).
+> device report is rejected and lost (the device still gets `204`). The
+> power-stage columns are named only by V2 reports, so while one is missing the
+> V2 reports are lost and V1 is unaffected.
 
 ---
 
@@ -153,6 +159,40 @@ The `valid_sample_mask` says which sensors were read successfully. Fields of a
 sensor whose bit is clear were transmitted as 0 and must be **discarded**, not
 read as a measurement — the dashboard greys those channels out and labels them
 "no reading".
+
+### V2
+
+Exactly V1 with 4 bytes more **at the end of the context**. The header (with
+version `0x02`), the 36-byte sample and context bytes `C+0` to `C+42` are
+V1's, and are decoded by the same field tables.
+
+| Section  | Size            | Contents                                                                     |
+| -------- | --------------- | ---------------------------------------------------------------------------- |
+| Header   | 14 bytes        | as V1                                                                        |
+| Samples  | 36 × N bytes    | as V1, **N from 1 to 5**                                                     |
+| Context  | 47 bytes        | the 43-byte V1 context, then the power stage                                 |
+
+**Total length = `61 + 36 · N` bytes** (97 for N = 1, 241 for N = 5). Any other
+length, or an N outside 1–5, is rejected.
+
+The power stage is read **once per report**, when it is built — it is not a
+per-sample value:
+
+| Offset (C = 14 + 36N) | Type | Field | Read failed |
+| --------------------- | ---- | ----- | ----------- |
+| `C+43` | uint16 | `vin_mv` — input voltage, mV | `0` |
+| `C+45` | uint8  | `uvlos_mask` — LTC3331 pins UV3..UV0 (bits 3..0; bits 4-7 are 0) | `0xFF` |
+| `C+46` | uint8  | `power_flags` — bit 0 supercapacitors connected, bit 1 energy harvesting active, bits 2-5 reserved (ignored) | bit 6 invalidates bit 0, bit 7 invalidates bit 1 |
+
+`uvlos_mask` selects the rising UVLO threshold and its window:
+
+| Value | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 |
+| ----- | - | - | - | - | - | - | - | - | - | - | -- | -- | -- | -- | -- | -- |
+| Rising (V) | 4 | 5 | 6 | 7 | 8 | 8 | 10 | 10 | 12 | 12 | 14 | 14 | 16 | 16 | 18 | 18 |
+| Window | short | short | short | short | short | wide | short | wide | short | wide | short | wide | short | wide | short | wide |
+
+A value with any of bits 4-7 set (other than `0xFF`) selects no threshold and is
+not guessed at: the raw value is kept and the threshold is unknown.
 
 ### V0
 
@@ -270,11 +310,46 @@ stores:
 | every other context field, `reporting_lost_counter` and `tx_failed` included | Generated (script `008`) |
 | `sample_time` and the 15 channels of the first sample, as engineering values (°C, %RH) | Generated (script `008`) |
 
+The V2 power stage is stored decoded, in both tables, as described in
+[The V2 power stage](#the-v2-power-stage).
+
 Script `008_payloads_v1_columns.sql` (in the Supabase scripts) also carries the
 two columns of `005`, which had never been run against the database. It is
 **not deployment-order sensitive**: nothing writes these columns, existing rows
 are filled when they are added, V0 rows get `NULL`, and until it runs the new
 columns just show empty.
+
+### The V2 power stage
+
+Both tables store the power stage **decoded, one column per reading**, and each
+column is **`NULL` when the device could not take that reading** — never a `0`
+or a `false` that would pass for a measurement. V1 rows have them all `NULL`.
+
+| Column | Type | Value | `NULL` when |
+| ------ | ---- | ----- | ----------- |
+| `vin_mv` | `integer` | input voltage, mV | the read failed (`vin_mv` = 0) |
+| `uvlos_mask` | `smallint` | UV3..UV0 as sent (the raw byte) | the read failed (`0xFF`) |
+| `uvlos_rising_v` | `smallint` | rising UVLO threshold, V, from the table above | `uvlos_mask` is unknown or selects no threshold |
+| `uvlos_window` | `text` | `short` / `wide` | as `uvlos_rising_v` |
+| `supercaps_connected` | `boolean` | `power_flags` bit 0 | bit 6 is set |
+| `eh_active` | `boolean` | `power_flags` bit 1 | bit 7 is set |
+
+- **`payloads_REE`**: plain nullable columns, written by the insert — for V2
+  reports only, so a V1 report never names them and V1 ingestion does not
+  depend on them existing.
+- **`public.payloads`**: `GENERATED … STORED` columns computed from the raw
+  `vin_mv`, `uvlos_mask` and `power_flags` the endpoint already writes into
+  `context`, like the V1 columns of `008`. Nothing writes them, existing rows
+  are filled when they are added, and the raw bytes stay in `context`.
+
+Both are added by script `009_payload_v2_power_stage.sql` (Supabase scripts).
+Run it **before** deploying the code that writes the REE columns: until then
+every V2 report routed to `payloads_REE` is rejected (and still answered
+`204`). The `public.payloads` half is not deployment-order sensitive.
+
+The decoded form is `decoded.power` (`resolvePowerStatus` in
+[`lib/payload-errors.ts`](lib/payload-errors.ts)); the generated columns of
+`public.payloads` implement the same rules in SQL.
 
 ### Reading the V1 counters and the battery
 
@@ -290,10 +365,9 @@ Three readings need care, and the dashboard already applies these rules:
   report means the **fuel gauge failed**, not an empty battery, and is excluded
   from the battery chart. A `0` without that bit is a genuinely flat battery and
   is charted.
-- `snr` uses `0` for "not available", but 0 dB is also a legal reading and v1
-  carries no flag to separate them. Zeros are excluded from the coverage stats,
-  which loses a real 0 dB reading in the process. v2 adds an explicit validity
-  flag for the radio metrics.
+- `snr` uses `0` for "not available", but 0 dB is also a legal reading and
+  neither v1 nor v2 carries a flag to separate them. Zeros are excluded from
+  the coverage stats, which loses a real 0 dB reading in the process.
 
 ### Run locally
 
@@ -310,9 +384,9 @@ npm run dev      # http://localhost:3000
 - Preferred `Content-Type: application/octet-stream`.
 - The body is read with `request.arrayBuffer()` and is **never** parsed as JSON.
 - **The response has no body** — the HTTP status is the entire answer: `204`
-  accepted, `400` decode failure **or a format other than the current V1**
-  (V0, older V1 revisions, no UID), `415` unreadable body, `500` unexpected
-  error.
+  accepted, `400` decode failure (unknown version, wrong length, V2 with N
+  outside 1–5) **or a format other than the current V1 or V2** (V0, older V1
+  revisions, no UID), `415` unreadable body, `500` unexpected error.
   Read the decoded payloads back with `GET /api/payloads` or in the dashboard.
   See [docs/api-payloads-ingest.md](docs/api-payloads-ingest.md) for the full
   endpoint contract.
@@ -406,7 +480,37 @@ The V1 example payload above decodes to:
 ```
 
 > Values are the **raw** integers. Apply `value / factor` for the engineering
-> value (`thermocouple_1: 235` → `23.5 °C`).
+> value (`thermocouple_1: 235` → `23.5 °C`). A V1 payload has `"power": null`.
+
+### Example — V2
+
+The V2 reference vector is the V1 example above with version `02` and the
+power stage `D4300803` appended (97 bytes):
+
+```bash
+echo -n "0200124B001A2B3C4D012A000000A068AA6AEB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01180000000057AC0FEFCDAB890C00000002000000A1FF08B7C0A80000020008200000941100000200050000D4300803" \
+  | xxd -r -p \
+  | curl -s -o /dev/null -w '%{http_code}\n' \
+      -X POST http://localhost:3000/api/payloads \
+      -H "Content-Type: application/octet-stream" \
+      --data-binary @-
+# → 204
+```
+
+It decodes like the V1 example, with `"payload_version": 2`,
+`"layout_revision": "v2"`, the three raw bytes added to `context`
+(`"vin_mv": 12500, "uvlos_mask": 8, "power_flags": 3`) and:
+
+```jsonc
+"power": {
+  "vin_mv": 12500,             // 12.5 V
+  "uvlos_mask": 8,
+  "uvlos_rising_v": 12,        // 12 V rising
+  "uvlos_window": "short",
+  "supercaps_connected": true, // power_flags bit 0
+  "eh_active": true            // power_flags bit 1
+}
+```
 
 ---
 
@@ -484,11 +588,13 @@ Pending.
 
 - `decodePayload(input)` — accepts `Buffer | ArrayBuffer | Uint8Array`, returns
   the structured `DecodedPayload` (version, device UID, sample count, samples,
-  context, error mask, reporting counter, resolved errors). The version byte at
-  offset 0 selects the layout; V0 and V1 are both handled.
+  context, error mask, reporting counter, resolved errors, and for V2 the
+  decoded `power` stage). The version byte at offset 0 selects the layout; V0,
+  V1 and V2 are handled, anything else is `UNSUPPORTED_VERSION`.
 - `layoutFor(version)`, `sampleFieldsFor(version)`, `contextFieldsFor(version)` —
-  the per-version field tables the UI iterates to render a payload. Adding a
-  future V2 means adding one entry to `LAYOUTS`, not branching at each call site.
+  the per-version field tables the UI iterates to render a payload. V2 is one
+  entry in `LAYOUTS`: the V1 header and sample tables, and the V1 context table
+  followed by `V2_POWER_FIELDS`.
 - `analyzePayload(input)` — `decodePayload` plus hex/binary representations and
   per-byte section annotation used by the UI.
 - Validation throws `PayloadDecodeError` with a stable `code`: `EMPTY_PAYLOAD`,
@@ -499,9 +605,11 @@ Pending.
 Error codes are resolved via `lib/payload-errors.ts` (mirrors the *Error Codes*
 document and `scripts/002_create_payload_error_codes.sql`). That module also
 resolves the V1 lookups: the valid sample mask, the last-communication-error
-enum, the modem status flags, and the reset source.
+enum, the modem status flags, and the reset source; and the V2 ones: the UVLO
+selection table and the power flags.
 
-`lib/payload-spec.test.ts` transcribes the V1 document tables literally and
+`lib/payload-spec.test.ts` transcribes the V1 document tables (and the V2
+additions) literally and
 asserts the implementation against them — field order, types, factors, units,
 and that each section tiles its bytes exactly with no gap or overlap. When the
 protocol document changes, update that file first: the failures then point at
@@ -515,10 +623,12 @@ every place the code has to follow.
 npm test          # vitest run
 ```
 
-`lib/payload-decoder.test.ts` covers the canonical example payload of **both**
-formats (header, device UID, signed sample values, full context, error-mask
-resolution, byte-section annotation) and every validation branch, including the
-V1 rule that a payload must carry exactly one sample.
+`lib/payload-decoder.test.ts` covers the canonical example payload of **every**
+format (header, device UID, signed sample values, full context, error-mask
+resolution, byte-section annotation, the V2 power stage) and every validation
+branch: the earlier V1 revisions carry exactly one sample, V2 is exactly
+`61 + 36 · N` bytes with N from 1 to 5, and each failed-read encoding of the V2
+power stage decodes as unknown.
 
 ---
 

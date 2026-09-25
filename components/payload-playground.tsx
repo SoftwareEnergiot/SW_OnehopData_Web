@@ -18,12 +18,19 @@ import { toast } from "sonner";
 import { FlaskConical, Info, Send, Wand2 } from "lucide-react";
 
 // Canonical example payloads from the protocol documents — friendly defaults so
-// the playground is useful on first load. V1 is the current device format; V0
-// is kept so legacy frames can still be pasted and decoded.
+// the playground is useful on first load. V1 and V2 are the device formats in
+// the field; V0 is kept so legacy frames can still be pasted and decoded.
 const V1_EXAMPLE_HEX =
   "0100124B001A2B3C4D012A000000" +
   "A068AA6AEB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01" +
   "180000000057AC0FEFCDAB890C00000002000000A1FF08B7C0A80000020008200000941100000200050000";
+
+// The V2 reference vector: the V1 example with version 2 and the power stage
+// (Vin 12500 mV, UVLO 12 V short, supercaps connected, EH active) appended.
+const V2_EXAMPLE_HEX =
+  "0200124B001A2B3C4D012A000000" +
+  "A068AA6AEB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01" +
+  "180000000057AC0FEFCDAB890C00000002000000A1FF08B7C0A80000020008200000941100000200050000D4300803";
 
 const V0_EXAMPLE_HEX =
   "0005BB00DA00D700BC008C020000000000000000C60016FD100200000000BB00BA00D700BC008C020000000000000000C60016FD110200000000BB00DA00D700BC008C020000000000000000C70016FD100200000000BA00DA00D700BC008C020000000000000000C60016FD110200000000BA00DA00D700BC008B020000000000000000C60016FD1102000000001800000000000000";
@@ -129,7 +136,10 @@ export function PayloadPlayground() {
             <p className="text-xs text-muted-foreground">
               Accepts spaces, <span className="font-mono">0x</span> prefixes and{" "}
               <span className="font-mono">:</span> separators. The version byte
-              selects the format: <span className="font-mono">01</span> → V1,{" "}
+              selects the format: <span className="font-mono">02</span> → V2,{" "}
+              <span className="font-mono">61 + 36 · N</span> bytes, N from 1 to
+              5 (14 header + 36 per sample + 47 context);{" "}
+              <span className="font-mono">01</span> → V1,{" "}
               <span className="font-mono">93</span> bytes (14 header + 36 sample
               + 43 context; the earlier 82- and 86-byte V1 revisions are still
               decoded); <span className="font-mono">00</span> → V0,{" "}
@@ -184,6 +194,13 @@ export function PayloadPlayground() {
               className="gap-2"
             >
               V1 example
+            </Button>
+            <Button
+              onClick={() => setHex(V2_EXAMPLE_HEX)}
+              variant="ghost"
+              className="gap-2"
+            >
+              V2 example
             </Button>
             <Button
               onClick={() => setHex(V0_EXAMPLE_HEX)}

@@ -5,8 +5,10 @@ import {
   V1_CONTEXT_FIELDS,
   V1_LAYOUT,
   V1_SAMPLE_FIELDS,
+  V2_LAYOUT,
   type PayloadAnalysis,
 } from "@/lib/payload-decoder";
+import type { PowerStatus } from "@/lib/payload-errors";
 import type { PayloadSchema } from "@/lib/payload-schemas";
 
 /** Source metadata the ingest endpoint records alongside a Development row. */
@@ -22,18 +24,22 @@ export class PayloadInsertError extends Error {
   }
 }
 
+/** The formats accepted for storage: the current V1 revision, and V2. */
+export const ACCEPTED_LAYOUTS = [V1_LAYOUT, V2_LAYOUT];
+
 /**
  * Why a decoded payload is not accepted for storage, or null when it is.
  *
- * Only the current V1 format is accepted, in every environment: V0 and the
- * earlier 82/86-byte V1 revisions still decode (so stored rows and the
- * Playground can show them), but a frame in any of them is discarded. Every
- * accepted payload therefore carries a device UID.
+ * Only the current V1 format and V2 are accepted, in every environment — during
+ * the firmware transition devices send either. V0 and the earlier 82/86-byte V1
+ * revisions still decode (so stored rows and the Playground can show them), but
+ * a frame in any of them is discarded. Every accepted payload therefore carries
+ * a device UID.
  */
 export function unsupportedFormat(analysis: PayloadAnalysis): string | null {
   const { decoded, meta } = analysis;
-  if (decoded.layout_revision !== V1_LAYOUT.revision) {
-    return `Only the current V1 format (${V1_LAYOUT.label}) is accepted; this payload is ${meta.revisionLabel}.`;
+  if (!ACCEPTED_LAYOUTS.some((layout) => layout.revision === decoded.layout_revision)) {
+    return `Only the current V1 format and V2 are accepted; this payload is ${meta.revisionLabel}.`;
   }
   if (!decoded.device_uid) {
     return "Every payload must carry a device UID.";
@@ -106,6 +112,20 @@ const REE_COLUMN_FOR_CHANNEL: Record<string, string> = {
  */
 export const REE_CONTEXT_COLUMNS: string[] = V1_CONTEXT_FIELDS.map((f) => f.key);
 
+/**
+ * The V2 power-stage columns of `payloads_REE`, each null when the device could
+ * not read it. Written for V2 reports only: a V1 report does not name them, so
+ * V1 ingestion does not depend on the columns existing.
+ */
+export const REE_POWER_COLUMNS: (keyof PowerStatus)[] = [
+  "vin_mv",
+  "uvlos_mask",
+  "uvlos_rising_v",
+  "uvlos_window",
+  "supercaps_connected",
+  "eh_active",
+];
+
 /** The 16 hex digits of a UID, uppercase and unseparated — REE's stored form. */
 function plainUid(uid: string): string {
   return uid.replace(/[^0-9A-Fa-f]/g, "").toUpperCase();
@@ -114,10 +134,10 @@ function plainUid(uid: string): string {
 /**
  * `payloads_REE` stores one *decoded sample* per row, no raw frame. A report of
  * N samples becomes N rows sharing the report's header and context fields, each
- * context field in its own column (the V1 format of the REE devices is frozen).
+ * context field in its own column. A V2 report adds the power stage, decoded.
  *
- * Only the current V1 revision maps: V0 carries neither a device UID nor these
- * channels, and the earlier V1 revisions carry no per-sample time, which
+ * Only the current V1 revision and V2 map: V0 carries neither a device UID nor
+ * these channels, and the earlier V1 revisions carry no per-sample time, which
  * `payloads_REE.sample_time` requires and which must not be faked with a 0.
  * Those are rejected with a message that says exactly why.
  */
@@ -126,7 +146,7 @@ function reeRows(analysis: PayloadAnalysis): Record<string, unknown>[] {
 
   if (decoded.device_uid === null) {
     throw new PayloadInsertError(
-      `This payload (${analysis.meta.revisionLabel}) carries no device UID, and payloads_REE.device_uid is NOT NULL. Only the current V1 format can be stored in the REE environment.`,
+      `This payload (${analysis.meta.revisionLabel}) carries no device UID, and payloads_REE.device_uid is NOT NULL. Only the current V1 format and V2 can be stored in the REE environment.`,
     );
   }
 
@@ -134,7 +154,7 @@ function reeRows(analysis: PayloadAnalysis): Record<string, unknown>[] {
     const time = sample.time;
     if (typeof time !== "number") {
       throw new PayloadInsertError(
-        `Sample ${index} of this payload (${analysis.meta.revisionLabel}) carries no sample time, and payloads_REE.sample_time is NOT NULL. Only the current V1 format, whose samples carry their read time, can be stored in the REE environment.`,
+        `Sample ${index} of this payload (${analysis.meta.revisionLabel}) carries no sample time, and payloads_REE.sample_time is NOT NULL. Only the current V1 format and V2, whose samples carry their read time, can be stored in the REE environment.`,
       );
     }
 
@@ -158,6 +178,12 @@ function reeRows(analysis: PayloadAnalysis): Record<string, unknown>[] {
 
     for (const column of REE_CONTEXT_COLUMNS) {
       row[column] = decoded.context[column];
+    }
+
+    if (decoded.power) {
+      for (const column of REE_POWER_COLUMNS) {
+        row[column] = decoded.power[column];
+      }
     }
 
     return row;

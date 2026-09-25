@@ -33,6 +33,14 @@ export interface PayloadRecord {
   // reports of the same boot session.
   reporting_lost_counter: number | null;
   tx_failed: number | null;
+  // V2 power stage, generated from `context` like the columns above. Null for
+  // V1 rows, and for a reading the device could not take.
+  vin_mv?: number | null;
+  uvlos_mask?: number | null;
+  uvlos_rising_v?: number | null;
+  uvlos_window?: "short" | "wide" | null;
+  supercaps_connected?: boolean | null;
+  eh_active?: boolean | null;
   source_ip: string | null;
   source_user_agent: string | null;
 }
@@ -98,6 +106,14 @@ export interface ReePayloadRecord {
   reporting_lost_counter: number | null;
   tx_failed: number | null;
   last_poll_status: number | null;
+  // V2 power stage, decoded. Null on V1 rows, and for a reading the device
+  // could not take.
+  vin_mv?: number | null;
+  uvlos_mask?: number | null;
+  uvlos_rising_v?: number | null;
+  uvlos_window?: "short" | "wide" | null;
+  supercaps_connected?: boolean | null;
+  eh_active?: boolean | null;
 }
 
 // Either environment's row shape. Schema-driven views read columns by key, so

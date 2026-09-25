@@ -58,6 +58,8 @@ export function cellText(row: PayloadRow, field: PayloadFieldDef): string {
       return typeof value === "number"
         ? value.toFixed(field.decimals ?? 1)
         : String(value);
+    case "boolean":
+      return value ? "yes" : "no";
     default:
       return String(value);
   }
@@ -114,6 +116,8 @@ export function PayloadCell({
       return <span className="font-mono">{cellText(row, field)}</span>;
     case "integer":
       return <span className="font-mono">{String(value)}</span>;
+    case "boolean":
+      return <span>{cellText(row, field)}</span>;
     default:
       return <span>{String(value)}</span>;
   }

@@ -50,10 +50,10 @@ function requestedEnvironment(request: NextRequest) {
  *
  * Receives a raw binary Onehop payload (preferably
  * `Content-Type: application/octet-stream`), decodes it and stores it in the
- * selected environment's table. Only the current V1 format is accepted: V0 and
- * the earlier V1 revisions still decode, but are discarded with a 400
- * (`unsupportedFormat` in lib/payload-insert), so every stored payload carries
- * a device UID.
+ * selected environment's table. Only the current V1 format and V2 are
+ * accepted: V0 and the earlier V1 revisions still decode, but are discarded
+ * with a 400 (`unsupportedFormat` in lib/payload-insert), so every stored
+ * payload carries a device UID.
  *
  * Devices send no `environment`, and the endpoint then picks the table from the
  * payload itself: a decoded device UID listed in the REE schema's
@@ -93,7 +93,7 @@ export async function POST(request: NextRequest) {
       throw error;
     }
 
-    // Only the current V1 format is stored. Anything else decoded but is
+    // Only the current V1 format and V2 are stored. Anything else decoded but is
     // discarded with a 400, so the sender knows the frame was not kept.
     const rejection = unsupportedFormat(analysis);
     if (rejection) {

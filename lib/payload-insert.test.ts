@@ -7,6 +7,7 @@ import {
 } from "@/lib/payload-decoder";
 import {
   PayloadInsertError,
+  REE_POWER_COLUMNS,
   rowsForSchema,
   unsupportedFormat,
 } from "@/lib/payload-insert";
@@ -19,6 +20,10 @@ const V1_EXAMPLE_HEX =
   "0100124B001A2B3C4D012A000000" +
   "A068AA6AEB00F100DC00DF00BC008C02D7009001E2040000C60016FD1002DC05C8057F01" +
   "180000000057AC0FEFCDAB890C00000002000000A1FF08B7C0A80000020008200000941100000200050000";
+
+// The V2 reference vector: the V1 example with version 2 and the power stage
+// (Vin 12500 mV, UVLO 12 V short, supercaps connected, EH active).
+const V2_EXAMPLE_HEX = "02" + V1_EXAMPLE_HEX.slice(2) + "D4300803";
 
 // The canonical V0 example: five samples, and no device UID at all.
 const V0_EXAMPLE_HEX =
@@ -118,6 +123,61 @@ describe("rowsForSchema — REE", () => {
   });
 });
 
+describe("V2 reports", () => {
+  it("keeps the power stage raw in the Development context", () => {
+    const rows = rowsForSchema(DEVELOPMENT_SCHEMA, analyse(V2_EXAMPLE_HEX), source);
+    expect(rows[0].payload_version).toBe(2);
+    // The decoded columns are generated from these by the database.
+    expect(rows[0].context).toMatchObject({ vin_mv: 12500, uvlos_mask: 8, power_flags: 3 });
+    expect(rows[0]).not.toHaveProperty("vin_mv");
+  });
+
+  it("stores the decoded power stage in its REE columns", () => {
+    const row = rowsForSchema(REE_SCHEMA, analyse(V2_EXAMPLE_HEX), source)[0];
+    expect(row).toMatchObject({
+      payload_version: 2,
+      vin_mv: 12500,
+      uvlos_mask: 8,
+      uvlos_rising_v: 12,
+      uvlos_window: "short",
+      supercaps_connected: true,
+      eh_active: true,
+    });
+    // The V1 context is stored exactly as for a V1 report.
+    for (const { key } of V1_CONTEXT_FIELDS) {
+      expect(row[key], key).toBe(analyse(V1_EXAMPLE_HEX).decoded.context[key]);
+    }
+    expect(row).not.toHaveProperty("power_flags");
+  });
+
+  it("writes null, not 0 or false, for a failed read", () => {
+    // vin_mv 0, uvlos_mask 0xFF, power_flags 0xC0.
+    const failed = V2_EXAMPLE_HEX.slice(0, -8) + "0000FFC0";
+    const row = rowsForSchema(REE_SCHEMA, analyse(failed), source)[0];
+    for (const column of REE_POWER_COLUMNS) {
+      expect(row[column], column).toBeNull();
+    }
+  });
+
+  it("names only columns that exist in payloads_REE", () => {
+    const known = new Set(REE_SCHEMA.fields.map((field) => field.key));
+    for (const column of Object.keys(rowsForSchema(REE_SCHEMA, analyse(V2_EXAMPLE_HEX), source)[0])) {
+      expect(known.has(column), column).toBe(true);
+    }
+  });
+
+  it("leaves the power columns out of a V1 row, so V1 does not depend on them", () => {
+    const row = rowsForSchema(REE_SCHEMA, analyse(V1_EXAMPLE_HEX), source)[0];
+    for (const column of REE_POWER_COLUMNS) {
+      expect(row, column).not.toHaveProperty(column);
+    }
+  });
+
+  it("is accepted for storage", () => {
+    expect(unsupportedFormat(analyse(V2_EXAMPLE_HEX))).toBeNull();
+  });
+});
+
 describe("canonicalUid", () => {
   it("reads any separator and case as the same device", () => {
     expect(canonicalUid("00:12:4B:00:38:A8:3D:90")).toBe("00124B0038A83D90");
@@ -139,7 +199,7 @@ describe("unsupportedFormat", () => {
   });
 
   it("discards a V0 payload, which carries no device UID", () => {
-    expect(unsupportedFormat(analyse(V0_EXAMPLE_HEX))).toMatch(/Only the current V1 format/);
+    expect(unsupportedFormat(analyse(V0_EXAMPLE_HEX))).toMatch(/Only the current V1 format and V2/);
   });
 
   it("discards the earlier 82-byte V1 revision", () => {
@@ -148,6 +208,6 @@ describe("unsupportedFormat", () => {
       V1_EXAMPLE_HEX.slice(0, 28) + V1_EXAMPLE_HEX.slice(36, 28 + 72) + V1_EXAMPLE_HEX.slice(28 + 72, 28 + 72 + 72),
     );
     expect(legacy.decoded.layout_revision).toBe("v1-82");
-    expect(unsupportedFormat(legacy)).toMatch(/Only the current V1 format/);
+    expect(unsupportedFormat(legacy)).toMatch(/Only the current V1 format and V2/);
   });
 });

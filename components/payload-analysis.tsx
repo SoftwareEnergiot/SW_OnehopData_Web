@@ -21,8 +21,11 @@ import {
 import { formatCreatedAt } from "@/lib/utils";
 import { describePollStatus, formatCrc32 } from "@/lib/remote-config";
 import {
+  VIN_READ_FAILED,
   describeCommError,
+  describePowerFlags,
   describeResetSource,
+  describeUvlos,
   formatErrorMask,
   formatSampleMask,
   invalidSampleFields,
@@ -96,6 +99,13 @@ export function describeContextValue(
     case "tx_failed":
       // Counters since boot: the useful reading is the delta between reports.
       return "counter since boot";
+    // V2 power stage. Each field has its own "read failed" encoding.
+    case "vin_mv":
+      return value === VIN_READ_FAILED ? "read failed" : `${value / 1000} V`;
+    case "uvlos_mask":
+      return describeUvlos(value);
+    case "power_flags":
+      return describePowerFlags(value);
     case "boot_count":
       // In the current revision this is a lifetime count, never cleared; in the
       // earlier ones it was reset by a factory reset.
@@ -424,6 +434,14 @@ function ContextSection({ analysis }: PayloadAnalysisViewProps) {
             Fields 8 to 14 (RSRP through last TX duration) are refreshed by the
             modem only while it registers on the network, so they describe the
             previous transmission cycle, not the instant this report was built.
+          </p>
+        )}
+        {layout.hasPowerStage && (
+          <p className="text-xs text-muted-foreground">
+            The last three fields are the power stage, read once when this
+            report was built. A failed read is stored as unknown: Vin 0, UVLO
+            select 0xFF, or power flags bit 6 / 7 for the supercapacitor /
+            energy harvesting state.
           </p>
         )}
       </CardContent>

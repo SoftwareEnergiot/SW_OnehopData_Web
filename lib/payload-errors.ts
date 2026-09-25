@@ -280,6 +280,139 @@ export const TIME_SOURCES: Record<number, string> = {
   3: "manual",
 };
 
+// ---------------------------------------------------------------------------
+// V2 additions: the power stage
+//
+// V2 appends three context fields, read once per report when it is built: the
+// input voltage, the UVLO threshold the LTC3331 is strapped to, and whether the
+// supercapacitors are connected and energy harvesting is active. Each has its
+// own "read failed" encoding, and a failed read must be stored as unknown
+// (null) rather than as a 0 or a false that looks like a measurement.
+// ---------------------------------------------------------------------------
+
+/** vin_mv value the firmware sends when the input voltage could not be read. */
+export const VIN_READ_FAILED = 0;
+/** uvlos_mask value the firmware sends when the UV pins could not be read. */
+export const UVLOS_READ_FAILED = 0xff;
+
+export type UvloWindow = "short" | "wide";
+
+export interface UvloThresholdDef {
+  /** UV3..UV0 as a number, 0-15. */
+  value: number;
+  /** Rising UVLO threshold, in volts. */
+  risingV: number;
+  window: UvloWindow;
+}
+
+// The LTC3331 UVLO selection table, as the V2 document gives it.
+export const UVLO_THRESHOLDS: UvloThresholdDef[] = [
+  { value: 0,  risingV: 4,  window: "short" },
+  { value: 1,  risingV: 5,  window: "short" },
+  { value: 2,  risingV: 6,  window: "short" },
+  { value: 3,  risingV: 7,  window: "short" },
+  { value: 4,  risingV: 8,  window: "short" },
+  { value: 5,  risingV: 8,  window: "wide" },
+  { value: 6,  risingV: 10, window: "short" },
+  { value: 7,  risingV: 10, window: "wide" },
+  { value: 8,  risingV: 12, window: "short" },
+  { value: 9,  risingV: 12, window: "wide" },
+  { value: 10, risingV: 14, window: "short" },
+  { value: 11, risingV: 14, window: "wide" },
+  { value: 12, risingV: 16, window: "short" },
+  { value: 13, risingV: 16, window: "wide" },
+  { value: 14, risingV: 18, window: "short" },
+  { value: 15, risingV: 18, window: "wide" },
+];
+
+// power_flags. Bits 2-5 are reserved and ignored.
+export const POWER_FLAG_SUPERCAPS_CONNECTED = 0x01;
+export const POWER_FLAG_EH_ACTIVE = 0x02;
+/** Set when the supercapacitor state could not be read: bit 0 is not valid. */
+export const POWER_FLAG_SUPERCAPS_READ_FAILED = 0x40;
+/** Set when the energy harvesting state could not be read: bit 1 is not valid. */
+export const POWER_FLAG_EH_READ_FAILED = 0x80;
+
+/**
+ * The V2 power-stage fields, read for storage: each one null when its read
+ * failed, so it is never mistaken for a measurement.
+ */
+export interface PowerStatus {
+  /** Input voltage in mV; null when the read failed (sent as 0). */
+  vin_mv: number | null;
+  /** UV3..UV0 as sent; null when the read failed (sent as 0xFF). */
+  uvlos_mask: number | null;
+  /** Rising UVLO threshold in volts; null when unknown. */
+  uvlos_rising_v: number | null;
+  uvlos_window: UvloWindow | null;
+  supercaps_connected: boolean | null;
+  eh_active: boolean | null;
+}
+
+/**
+ * The UVLO threshold a uvlos_mask selects, or null when it selects none: a
+ * failed read (0xFF), or a value with any of the always-zero bits 4-7 set,
+ * which is malformed and is not decoded by guessing at its low bits.
+ */
+export function resolveUvlos(value: number): UvloThresholdDef | null {
+  return UVLO_THRESHOLDS.find((def) => def.value === value) ?? null;
+}
+
+/**
+ * The two states power_flags carries. A state whose read-failed bit is set is
+ * unknown (null), not false: its own bit is not valid then.
+ */
+export function resolvePowerFlags(
+  value: number,
+): Pick<PowerStatus, "supercaps_connected" | "eh_active"> {
+  return {
+    supercaps_connected:
+      value & POWER_FLAG_SUPERCAPS_READ_FAILED
+        ? null
+        : (value & POWER_FLAG_SUPERCAPS_CONNECTED) !== 0,
+    eh_active:
+      value & POWER_FLAG_EH_READ_FAILED ? null : (value & POWER_FLAG_EH_ACTIVE) !== 0,
+  };
+}
+
+export function resolvePowerStatus(
+  vinMv: number,
+  uvlosMask: number,
+  powerFlags: number,
+): PowerStatus {
+  const uvlo = resolveUvlos(uvlosMask);
+  return {
+    vin_mv: vinMv === VIN_READ_FAILED ? null : vinMv,
+    uvlos_mask: uvlosMask === UVLOS_READ_FAILED ? null : uvlosMask,
+    uvlos_rising_v: uvlo?.risingV ?? null,
+    uvlos_window: uvlo?.window ?? null,
+    ...resolvePowerFlags(powerFlags),
+  };
+}
+
+/** "12 V rising, short window", for a table cell. */
+export function describeUvlos(value: number): string {
+  if (value === UVLOS_READ_FAILED) return "read failed";
+  const uvlo = resolveUvlos(value);
+  return uvlo
+    ? `${uvlo.risingV} V rising, ${uvlo.window} window`
+    : "not a UVLO selection: bits 4-7 should always be 0";
+}
+
+/** "supercaps connected, EH active", for a table cell. */
+export function describePowerFlags(value: number): string {
+  const { supercaps_connected, eh_active } = resolvePowerFlags(value);
+  const supercaps =
+    supercaps_connected === null
+      ? "supercaps read failed"
+      : supercaps_connected
+        ? "supercaps connected"
+        : "supercaps disconnected";
+  const eh =
+    eh_active === null ? "EH read failed" : eh_active ? "EH active" : "EH inactive";
+  return `${supercaps}, ${eh}`;
+}
+
 // Bits 5-7 were reserved in the earlier V1 revisions and are always 0 there, so
 // decoding them unconditionally is safe: an old payload simply reads as
 // "uptime, no clock sync". Pass describeTime = false to leave them out for a
