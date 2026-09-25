@@ -130,10 +130,14 @@ describe("schema selection", () => {
   });
 
   it("charts REE diagnostics, and falls back to the sensors without them", () => {
-    const [full, fallback] = REE_SCHEMA.summaryColumnTiers.map((tier) =>
+    const [power, full, fallback] = REE_SCHEMA.summaryColumnTiers.map((tier) =>
       tier.split(","),
     );
+    // Without the V2 power-stage columns, everything else still charts.
+    expect(power).toContain("vin_mv");
+    expect(full).not.toContain("vin_mv");
     for (const column of ["battery_soc", "rsrp", "snr", "error_mask"]) {
+      expect(power).toContain(column);
       expect(full).toContain(column);
       expect(fallback).not.toContain(column);
     }

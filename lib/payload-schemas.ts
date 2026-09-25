@@ -30,7 +30,8 @@ export type FieldKind =
   | "number" // may carry decimals
   | "errorMask" // decoded against payload_error_codes
   | "sampleMask" // valid_sample_mask bitmask
-  | "sampleTime"; // uint32 seconds, UTC epoch or since boot (see below)
+  | "sampleTime" // uint32 seconds, UTC epoch or since boot (see below)
+  | "boolean";
 
 export interface PayloadFieldDef {
   key: string;
@@ -240,6 +241,23 @@ const V1_SAMPLE_COLUMN_FIELDS: PayloadFieldDef[] = [
   { key: "valid_sample_mask", label: "Valid Sample Mask", kind: "sampleMask", group: "Validity", description: "Bitmask indicating which sensor measurements were successfully acquired." },
 ];
 
+// The V2 power stage, read once per report. Both tables store it decoded, one
+// column per reading — payloads_REE written by the insert, payloads generated
+// from its `context` JSONB — and each column is empty when the device could not
+// read it, never a 0 or a "no" that would pass for a measurement. V1 rows have
+// no power stage, so every one of these is empty for them.
+const V2_POWER_COLUMN_FIELDS: PayloadFieldDef[] = [
+  { key: "vin_mv", label: "Input voltage (Vin)", unit: "mV", kind: "integer", group: "Power", protocolType: "uint16", chartable: true, description: "Input voltage of the power stage. V2 only; empty when the read failed (sent as 0)." },
+  { key: "uvlos_mask", label: "UVLO select (UV3..UV0)", kind: "integer", group: "Power", protocolType: "uint8", description: "LTC3331 UV3..UV0 pins, as sent. V2 only; empty when the read failed (sent as 0xFF)." },
+  { key: "uvlos_rising_v", label: "UVLO rising threshold", unit: "V", kind: "integer", group: "Power", description: "Rising UVLO threshold the UV pins select. Empty when uvlos_mask is unknown or selects no threshold." },
+  { key: "uvlos_window", label: "UVLO window", kind: "text", group: "Power", description: "UVLO hysteresis window the UV pins select: short or wide." },
+  { key: "supercaps_connected", label: "Supercapacitors connected", kind: "boolean", group: "Power", description: "power_flags bit 0. Empty when bit 6 says the read failed." },
+  { key: "eh_active", label: "Energy harvesting active", kind: "boolean", group: "Power", description: "power_flags bit 1. Empty when bit 7 says the read failed." },
+];
+
+/** Power-stage columns the summary endpoint charts. */
+const POWER_CHARTABLE = chartableKeys(V2_POWER_COLUMN_FIELDS);
+
 /* ------------------------------------------------------------------- views */
 
 /**
@@ -276,6 +294,14 @@ const DIAGNOSTIC_COLUMNS = [
   "reporting_lost_counter",
   "tx_failed",
 ];
+
+/**
+ * Columns minus the V2 power stage, for the tier that still works against a
+ * table the power-stage SQL has not reached yet.
+ */
+function withoutPower(columns: string[]): string[] {
+  return columns.filter((column) => !POWER_CHARTABLE.includes(column));
+}
 
 /** A comma-separated select list, each column once, in first-seen order. */
 function selectList(columns: string[]): string {
@@ -339,6 +365,7 @@ const DEVELOPMENT_FIELDS: PayloadFieldDef[] = [
   // The first sample's channels (a V1 report carries one), then the context.
   ...V1_SAMPLE_COLUMN_FIELDS,
   ...V1_CONTEXT_COLUMN_FIELDS,
+  ...V2_POWER_COLUMN_FIELDS,
 ];
 
 const DEVELOPMENT_CHARTABLE = chartableKeys(DEVELOPMENT_FIELDS);
@@ -365,12 +392,19 @@ export const DEVELOPMENT_SCHEMA: PayloadSchema = {
   ],
   defaultCharts: DEFAULT_CHARTS,
   summaryColumnTiers: [
-    // scripts/008: every V1 field has its column.
+    // With the V2 power-stage columns.
     selectList([
       ...BASE_SUMMARY_COLUMNS,
       "valid_sample_mask",
       ...DIAGNOSTIC_COLUMNS,
       ...DEVELOPMENT_CHARTABLE,
+    ]),
+    // scripts/008: every V1 field has its column.
+    selectList([
+      ...BASE_SUMMARY_COLUMNS,
+      "valid_sample_mask",
+      ...DIAGNOSTIC_COLUMNS,
+      ...withoutPower(DEVELOPMENT_CHARTABLE),
     ]),
     // scripts/004 only: battery and radio diagnostics.
     selectList([...BASE_SUMMARY_COLUMNS, "battery_soc", "battery_voltage", "rsrp", "snr"]),
@@ -404,6 +438,8 @@ const REE_FIELDS: PayloadFieldDef[] = [
   ...V1_SAMPLE_COLUMN_FIELDS,
   // The report's batch context, one column per field.
   ...V1_CONTEXT_COLUMN_FIELDS,
+  // The V2 power stage, decoded.
+  ...V2_POWER_COLUMN_FIELDS,
 ];
 
 const REE_CHARTABLE = chartableKeys(REE_FIELDS);
@@ -426,13 +462,21 @@ export const REE_SCHEMA: PayloadSchema = {
   charts: ["reception", "reporting_counter", "battery_soc", "rsrp", ...REE_CHARTABLE],
   defaultCharts: DEFAULT_CHARTS,
   summaryColumnTiers: [
-    // With the context columns.
+    // With the V2 power-stage columns.
     selectList([
       "created_at",
       "reporting_counter",
       "valid_sample_mask",
       ...DIAGNOSTIC_COLUMNS,
       ...REE_CHARTABLE,
+    ]),
+    // With the context columns.
+    selectList([
+      "created_at",
+      "reporting_counter",
+      "valid_sample_mask",
+      ...DIAGNOSTIC_COLUMNS,
+      ...withoutPower(REE_CHARTABLE),
     ]),
     // A table without them still charts the sensor channels.
     selectList(["created_at", "reporting_counter", "valid_sample_mask", ...REE_SENSOR_KEYS]),

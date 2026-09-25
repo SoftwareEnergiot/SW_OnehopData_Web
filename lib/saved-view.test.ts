@@ -134,8 +134,12 @@ describe("Development columns", () => {
     }
   });
 
-  it("falls back to the scripts/004 columns, then the original ones", () => {
-    const [full, only004, base] = DEVELOPMENT_SCHEMA.summaryColumnTiers.map((t) => t.split(","));
+  it("falls back to the V1 columns, then the scripts/004 ones, then the original ones", () => {
+    const [power, full, only004, base] = DEVELOPMENT_SCHEMA.summaryColumnTiers.map((t) =>
+      t.split(","),
+    );
+    expect(power).toContain("vin_mv");
+    expect(full).not.toContain("vin_mv");
     expect(full).toContain("ambient_temperature");
     expect(full).toContain("tx_failed");
     expect(only004).toContain("battery_soc");

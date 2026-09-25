@@ -14,7 +14,15 @@
 //     Samples : 36 * N bytes   -> N consecutive 36-byte samples, each starting
 //                                 with its read time (N is 1 in practice)
 //     Context : 43 bytes       -> error mask plus battery / modem diagnostics
-//     Total   = 93 bytes for N = 1
+//     Total   = 57 + 36*N bytes (93 for N = 1)
+//
+//   V2 — exactly V1 with 4 more bytes at the end of the context
+//     Header  : 14 bytes       -> as V1
+//     Samples : 36 * N bytes   -> as V1, with 1 <= N <= 5
+//     Context : 47 bytes       -> the V1 context, then vin_mv (uint16),
+//                                 uvlos_mask (uint8) and power_flags (uint8):
+//                                 the power stage, read once per report
+//     Total   = 61 + 36*N bytes (97 for N = 1, 241 for N = 5)
 //
 // The V1 document has been revised twice WITHOUT changing the version byte:
 // 82 bytes (32-byte sample, 36-byte context), then 86 bytes (40-byte context),
@@ -35,6 +43,8 @@
 import {
   resolveErrorMask,
   formatErrorMask,
+  resolvePowerStatus,
+  type PowerStatus,
   type ResolvedError,
 } from "@/lib/payload-errors";
 
@@ -48,6 +58,13 @@ export const V1_HEADER_SIZE = 14;
 export const V1_SAMPLE_SIZE = 36;
 export const V1_CONTEXT_SIZE = 43;
 
+// --- V2 geometry: V1 plus the power stage at the end of the context --------
+export const V2_HEADER_SIZE = V1_HEADER_SIZE;
+export const V2_SAMPLE_SIZE = V1_SAMPLE_SIZE;
+export const V2_CONTEXT_SIZE = V1_CONTEXT_SIZE + 4;
+export const V2_MIN_SAMPLE_COUNT = 1;
+export const V2_MAX_SAMPLE_COUNT = 5;
+
 // Back-compat aliases: these names date from when V0 was the only format and
 // are still imported by existing callers and tests.
 export const HEADER_SIZE = V0_HEADER_SIZE;
@@ -55,7 +72,7 @@ export const SAMPLE_SIZE = V0_SAMPLE_SIZE;
 export const CONTEXT_SIZE = V0_CONTEXT_SIZE;
 
 // Versions this decoder understands.
-export const SUPPORTED_VERSIONS = [0, 1] as const;
+export const SUPPORTED_VERSIONS = [0, 1, 2] as const;
 
 export type PayloadInput = Buffer | ArrayBuffer | Uint8Array;
 
@@ -171,6 +188,21 @@ export const V1_CONTEXT_FIELDS: ContextFieldDef[] = [
   { key: "last_poll_status",         label: "Last poll status",         offset: 42, type: "uint8",  unit: "" },
 ];
 
+// The fields V2 appends to the V1 context, at C+43..C+46. Read once per report
+// when it is built, not per sample. Each has a "read failed" encoding (vin_mv 0,
+// uvlos_mask 0xFF, power_flags bits 6-7), resolved by resolvePowerStatus.
+export const V2_POWER_FIELDS: ContextFieldDef[] = [
+  { key: "vin_mv",      label: "Input voltage (Vin)",    offset: 43, type: "uint16", unit: "mV" },
+  { key: "uvlos_mask",  label: "UVLO select (UV3..UV0)", offset: 45, type: "uint8",  unit: "" },
+  { key: "power_flags", label: "Power flags",            offset: 46, type: "uint8",  unit: "" },
+];
+
+// The 47-byte V2 context: the V1 context unchanged, then the power stage.
+export const V2_CONTEXT_FIELDS: ContextFieldDef[] = [
+  ...V1_CONTEXT_FIELDS,
+  ...V2_POWER_FIELDS,
+];
+
 // --- Earlier V1 revisions, kept so stored payloads and older firmware decode --
 
 // The 32-byte sample of the 82- and 86-byte revisions: no time field.
@@ -227,7 +259,11 @@ export interface PayloadLayout {
   hasDeviceUid: boolean;
   /** Set when the format allows exactly one sample count. */
   requiredSampleCount: number | null;
-  /** Whether each sample carries its read time (current V1 revision only). */
+  /** Set when the format bounds the sample count, both ends inclusive. */
+  sampleCountRange: { min: number; max: number } | null;
+  /** Whether the context ends with the power stage (V2 and later). */
+  hasPowerStage: boolean;
+  /** Whether each sample carries its read time (current V1 revision and V2). */
   hasSampleTime: boolean;
 }
 
@@ -247,6 +283,8 @@ export const V0_LAYOUT: PayloadLayout = {
   contextFields: V0_CONTEXT_FIELDS,
   hasDeviceUid: false,
   requiredSampleCount: null,
+  sampleCountRange: null,
+  hasPowerStage: false,
   hasSampleTime: false,
 };
 
@@ -263,6 +301,8 @@ export const V1_LAYOUT: PayloadLayout = {
   // The document no longer requires rejecting sample_count != 1: it is 1 in
   // practice, and the per-sample time now makes several samples placeable.
   requiredSampleCount: null,
+  sampleCountRange: null,
+  hasPowerStage: false,
   hasSampleTime: true,
 };
 
@@ -277,6 +317,8 @@ export const V1_REV_86_LAYOUT: PayloadLayout = {
   contextFields: V1_REV_86_CONTEXT_FIELDS,
   hasDeviceUid: true,
   requiredSampleCount: 1,
+  sampleCountRange: null,
+  hasPowerStage: false,
   hasSampleTime: false,
 };
 
@@ -291,13 +333,31 @@ export const V1_REV_82_LAYOUT: PayloadLayout = {
   contextFields: V1_REV_82_CONTEXT_FIELDS,
   hasDeviceUid: true,
   requiredSampleCount: 1,
+  sampleCountRange: null,
+  hasPowerStage: false,
   hasSampleTime: false,
+};
+
+// V2 reuses the V1 header and sample tables as they are; only the context grows,
+// and the sample count is bounded.
+export const V2_LAYOUT: PayloadLayout = {
+  ...V1_LAYOUT,
+  revision: "v2",
+  label: "V2",
+  version: 2,
+  headerSize: V2_HEADER_SIZE,
+  sampleSize: V2_SAMPLE_SIZE,
+  contextSize: V2_CONTEXT_SIZE,
+  contextFields: V2_CONTEXT_FIELDS,
+  sampleCountRange: { min: V2_MIN_SAMPLE_COUNT, max: V2_MAX_SAMPLE_COUNT },
+  hasPowerStage: true,
 };
 
 // Every layout of a version, current revision first.
 const LAYOUTS_BY_VERSION: Record<number, PayloadLayout[]> = {
   0: [V0_LAYOUT],
   1: [V1_LAYOUT, V1_REV_86_LAYOUT, V1_REV_82_LAYOUT],
+  2: [V2_LAYOUT],
 };
 
 const LAYOUTS_BY_REVISION: Record<string, PayloadLayout> = Object.fromEntries(
@@ -310,6 +370,7 @@ const LAYOUTS_BY_REVISION: Record<string, PayloadLayout> = Object.fromEntries(
 export const LAYOUTS: Record<number, PayloadLayout> = {
   0: V0_LAYOUT,
   1: V1_LAYOUT,
+  2: V2_LAYOUT,
 };
 
 // The current layout of a version, or undefined when the version is unknown.
@@ -387,7 +448,7 @@ export type DecodedContext = {
 
 export interface DecodedPayload {
   payload_version: number;
-  /** The exact wire format the payload was read with ("v0", "v1", "v1-86", "v1-82"). */
+  /** The exact wire format the payload was read with ("v0", "v1", "v1-86", "v1-82", "v2"). */
   layout_revision: string;
   /** Colon-separated uppercase UID ("00:12:4B:…"), null for V0 payloads. */
   device_uid: string | null;
@@ -400,6 +461,12 @@ export interface DecodedPayload {
    * time). Null for formats whose samples carry no time.
    */
   sample_time_utc: boolean | null;
+  /**
+   * The V2 power stage, each reading null when the device could not read it.
+   * The raw bytes stay in `context` (vin_mv, uvlos_mask, power_flags). Null
+   * for formats that do not carry it.
+   */
+  power: PowerStatus | null;
   // Convenience mirrors of the context fields plus the resolved catalog.
   error_mask: number;
   error_mask_hex: string;
@@ -661,6 +728,16 @@ export function decodePayload(input: PayloadInput): DecodedPayload {
     );
   }
 
+  // V2 bounds N, so together with the checks above the only lengths it accepts
+  // are 61 + 36N for N in 1..5.
+  const range = layout.sampleCountRange;
+  if (range && (sampleCount < range.min || sampleCount > range.max)) {
+    throw new PayloadDecodeError(
+      "SAMPLE_COUNT_MISMATCH",
+      `${layout.label} carries ${range.min} to ${range.max} samples, got ${sampleCount}.`,
+    );
+  }
+
   // --- Samples ---
   const samples: DecodedSample[] = [];
   for (let i = 0; i < sampleCount; i++) {
@@ -700,6 +777,14 @@ export function decodePayload(input: PayloadInput): DecodedPayload {
     sample_time_utc: layout.hasSampleTime
       ? ((rawContext.status_flags ?? 0) & STATUS_FLAG_TIME_UTC) !== 0
       : null,
+    power:
+      layout.hasPowerStage
+        ? resolvePowerStatus(
+            rawContext.vin_mv,
+            rawContext.uvlos_mask,
+            rawContext.power_flags,
+          )
+        : null,
     error_mask: errorMask,
     error_mask_hex: formatErrorMask(errorMask),
     reporting_counter: reportingCounter,

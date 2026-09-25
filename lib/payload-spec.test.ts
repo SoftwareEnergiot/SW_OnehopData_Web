@@ -20,6 +20,10 @@ import {
   V1_HEADER_SIZE,
   V1_SAMPLE_FIELDS,
   V1_SAMPLE_SIZE,
+  V2_CONTEXT_FIELDS,
+  V2_CONTEXT_SIZE,
+  V2_HEADER_SIZE,
+  V2_SAMPLE_SIZE,
   expectedLength,
   layoutFor,
 } from "@/lib/payload-decoder";
@@ -27,14 +31,23 @@ import {
   COMM_ERRORS,
   ERR_BIT_BAT_STATUS_UNKNOWN,
   PAYLOAD_ERRORS,
+  POWER_FLAG_EH_ACTIVE,
+  POWER_FLAG_EH_READ_FAILED,
+  POWER_FLAG_SUPERCAPS_CONNECTED,
+  POWER_FLAG_SUPERCAPS_READ_FAILED,
   RESET_SOURCES,
   TIME_SOURCES,
+  UVLOS_READ_FAILED,
+  UVLO_THRESHOLDS,
   VALID_SAMPLE_BITS,
   describeResetSource,
   isBatterySocValid,
   resolveErrorMask,
+  resolvePowerFlags,
+  resolvePowerStatus,
   resolveResetSource,
   resolveStatusFlags,
+  resolveUvlos,
 } from "@/lib/payload-errors";
 
 // Bytes each field type occupies, used to prove the tables tile their section
@@ -155,6 +168,91 @@ describe("V1 context table", () => {
       offset += WIDTH[field.type];
     }
     expect(offset).toBe(V1_CONTEXT_SIZE);
+  });
+});
+
+describe("V2 layout", () => {
+  it("is V1 with 4 more bytes at the end of the context", () => {
+    const v2 = layoutFor(2)!;
+    expect(V2_HEADER_SIZE).toBe(V1_HEADER_SIZE);
+    expect(V2_SAMPLE_SIZE).toBe(V1_SAMPLE_SIZE);
+    expect(V2_CONTEXT_SIZE).toBe(47);
+    expect(v2.sampleFields).toBe(V1_SAMPLE_FIELDS);
+    expect(V2_CONTEXT_FIELDS.slice(0, V1_CONTEXT_FIELDS.length)).toEqual(V1_CONTEXT_FIELDS);
+  });
+
+  it("is 61 + 36N bytes, N from 1 to 5", () => {
+    expect(layoutFor(2)!.sampleCountRange).toEqual({ min: 1, max: 5 });
+    for (let n = 1; n <= 5; n++) expect(expectedLength(n, 2)).toBe(61 + 36 * n);
+    expect(expectedLength(1, 2)).toBe(97);
+    expect(expectedLength(5, 2)).toBe(241);
+  });
+
+  // The fields at C+43..C+46: [key, offset, type, unit].
+  const SPEC = [
+    ["vin_mv",      43, "uint16", "mV"],
+    ["uvlos_mask",  45, "uint8",  ""],
+    ["power_flags", 46, "uint8",  ""],
+  ] as const;
+
+  it("appends vin_mv, uvlos_mask and power_flags, and tiles the 47 bytes", () => {
+    const appended = V2_CONTEXT_FIELDS.slice(V1_CONTEXT_FIELDS.length);
+    expect(appended.map((f) => [f.key, f.offset, f.type, f.unit])).toEqual(
+      SPEC.map((row) => [...row]),
+    );
+    let offset = 0;
+    for (const field of V2_CONTEXT_FIELDS) {
+      expect({ key: field.key, offset: field.offset }).toEqual({ key: field.key, offset });
+      offset += WIDTH[field.type];
+    }
+    expect(offset).toBe(V2_CONTEXT_SIZE);
+  });
+});
+
+describe("uvlos_mask", () => {
+  // The document's table: value -> [rising threshold V, window].
+  const SPEC: [number, number, "short" | "wide"][] = [
+    [0, 4, "short"],
+    [1, 5, "short"],
+    [2, 6, "short"],
+    [3, 7, "short"],
+    [4, 8, "short"],
+    [5, 8, "wide"],
+    [6, 10, "short"],
+    [7, 10, "wide"],
+    [8, 12, "short"],
+    [9, 12, "wide"],
+    [10, 14, "short"],
+    [11, 14, "wide"],
+    [12, 16, "short"],
+    [13, 16, "wide"],
+    [14, 18, "short"],
+    [15, 18, "wide"],
+  ];
+
+  it("decodes all 16 selections as documented", () => {
+    expect(UVLO_THRESHOLDS.map((d) => [d.value, d.risingV, d.window])).toEqual(SPEC);
+  });
+
+  it("reads 0xFF as a failed read", () => {
+    expect(UVLOS_READ_FAILED).toBe(0xff);
+    expect(resolveUvlos(0xff)).toBeNull();
+    expect(resolvePowerStatus(12500, 0xff, 0x03).uvlos_mask).toBeNull();
+  });
+});
+
+describe("power_flags", () => {
+  it("uses bits 0-1 for the states and bits 6-7 for their read failures", () => {
+    expect(POWER_FLAG_SUPERCAPS_CONNECTED).toBe(0x01);
+    expect(POWER_FLAG_EH_ACTIVE).toBe(0x02);
+    expect(POWER_FLAG_SUPERCAPS_READ_FAILED).toBe(0x40);
+    expect(POWER_FLAG_EH_READ_FAILED).toBe(0x80);
+  });
+
+  it("decodes 0xC0 as both states unknown", () => {
+    expect(resolvePowerFlags(0xc0)).toEqual({ supercaps_connected: null, eh_active: null });
+    // The state bits say nothing while their read failed.
+    expect(resolvePowerFlags(0xc3)).toEqual({ supercaps_connected: null, eh_active: null });
   });
 });
 

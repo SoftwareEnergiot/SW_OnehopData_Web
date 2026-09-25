@@ -17,7 +17,7 @@ import {
 } from "@/components/payload-analysis";
 import {
   STATUS_FLAG_TIME_UTC,
-  V1_CONTEXT_FIELDS,
+  V2_CONTEXT_FIELDS,
 } from "@/lib/payload-decoder";
 import {
   TIME_SOURCES,
@@ -137,7 +137,7 @@ export function PayloadRecordView({
   );
 }
 
-const CONTEXT_KEYS = new Set(V1_CONTEXT_FIELDS.map((field) => field.key));
+const CONTEXT_KEYS = new Set(V2_CONTEXT_FIELDS.map((field) => field.key));
 
 /**
  * What a field's value means. For a context field that encodes something (an
@@ -147,8 +147,8 @@ const CONTEXT_KEYS = new Set(V1_CONTEXT_FIELDS.map((field) => field.key));
 function meaningOf(row: PayloadRow, field: PayloadFieldDef): string | undefined {
   const value = numericValue(row, field.key);
   if (value !== null && CONTEXT_KEYS.has(field.key)) {
-    // The REE devices send the current V1 revision, whose status flags carry
-    // the sample-time bits.
+    // Rows are stored from the current V1 revision or V2, whose status flags
+    // both carry the sample-time bits.
     const gloss = describeContextValue(
       field.key,
       value,
