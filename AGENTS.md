@@ -55,14 +55,19 @@ worth keeping.
 
 ## Pull request and merge
 
-`gh` is authenticated with two accounts, and the active one (`marcEnergiot`) is
-**not** a collaborator on the fork. Use the other one per command, without
-switching the active account:
+The pull request is opened on the fork, **SoftwareEnergiot/SW_OnehopData_Web**,
+and only the `SoftwareEnergiot` GitHub account can open one there. `gh` has more
+than one account logged in, so switch the active one to `SoftwareEnergiot` just
+for the pull request, then switch back to whichever account was active before:
 
 ```bash
-GH_TOKEN=$(gh auth token --user SoftwareEnergiot) \
-  gh pr create --repo SoftwareEnergiot/SW_OnehopData_Web --base main --head <branch>
+PREV=$(gh api user --jq .login)
+gh auth switch --user SoftwareEnergiot
+gh pr create --repo SoftwareEnergiot/SW_OnehopData_Web --base main --head <branch>
+gh auth switch --user "$PREV"
 ```
+
+Always switch back, even if `gh pr create` fails. Never read or print a token.
 
 Wait for both checks — the second is the Vercel preview build. **A human merges
 the pull request.** Ask for it and wait; never push to `main` and never look for
