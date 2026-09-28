@@ -12,7 +12,8 @@ import { environmentForDeviceUid } from "@/lib/payload-repository";
  * throws, gives up after `FORWARD_TIMEOUT_MS` and only logs a failure.
  */
 
-export const FORWARD_URL = "http://etl-prd.metrics.nc:6789/post";
+export const FORWARD_URL =
+  "https://app.dynagrid.io/api/v1/integrations/http/56e271b4-c9b2-feef-91bb-44262e41caa9";
 export const FORWARD_TIMEOUT_MS = 10_000;
 
 const OCTET_STREAM = "application/octet-stream";
