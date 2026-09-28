@@ -19,7 +19,8 @@ import {
   unsupportedFormat,
 } from "@/lib/payload-insert";
 import { learnDeviceToken, parseBearerToken } from "@/lib/device-auth";
-import { NextRequest, NextResponse } from "next/server";
+import { forwardPayload, shouldForward } from "@/lib/payload-forward";
+import { after, NextRequest, NextResponse } from "next/server";
 
 // Raw binary bodies require the Node.js runtime (not the Edge runtime) so the
 // full request buffer is available via request.arrayBuffer().
@@ -68,6 +69,10 @@ function requestedEnvironment(request: NextRequest) {
  * behind a 204. That is what makes the REE device-UID constraint visible
  * instead of silent. A rejected write is never retried against another
  * environment.
+ *
+ * A device report sent as `application/octet-stream` by a device routed to
+ * REE is also forwarded, byte for byte, to the other platform
+ * (lib/payload-forward) after the response — whatever the storage outcome.
  */
 export async function POST(request: NextRequest) {
   const explicitEnvironment =
@@ -104,6 +109,18 @@ export async function POST(request: NextRequest) {
             { status: 400 },
           )
         : new NextResponse(null, { status: 400 });
+    }
+
+    // The REE device's report is also relayed, unchanged, to the other
+    // platform — once the device has had its answer (lib/payload-forward).
+    if (
+      shouldForward(
+        analysis.decoded.device_uid,
+        request.headers.get("content-type"),
+        explicitEnvironment,
+      )
+    ) {
+      after(() => forwardPayload(bytes));
     }
 
     try {
