@@ -19,6 +19,7 @@ import {
   unsupportedFormat,
 } from "@/lib/payload-insert";
 import { learnDeviceToken, parseBearerToken } from "@/lib/device-auth";
+import { cursorFilter, nextCursor, parseCursor } from "@/lib/payload-cursor";
 import {
   forwardPayload,
   forwardUrl,
@@ -273,6 +274,11 @@ export async function POST(request: NextRequest) {
  * (`from` / `to`) filter on `created_at`, and an optional `device_uid` filter
  * (any separator or case; `none` selects the payloads without a UID).
  *
+ * Large ranges (exports) page with a cursor instead of `offset`: pass the
+ * `next_cursor` of the previous answer as `before` / `before_id`, and
+ * `count=none` to skip the exact count (lib/payload-cursor). `offset` keeps
+ * working for the table's own pages.
+ *
  * Omitting `environment` lists `public.payloads`, which is what this endpoint
  * has always returned. Naming one that does not exist, or that this application
  * has no data source for, is an error — never another environment's rows.
@@ -283,6 +289,22 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get("limit") || "50");
     const offset = parseInt(searchParams.get("offset") || "0");
     const errorMask = searchParams.get("error_mask");
+    const withCount = searchParams.get("count") !== "none";
+    const cursor = parseCursor(
+      searchParams.get("before"),
+      searchParams.get("before_id"),
+    );
+    if (cursor === "invalid") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Invalid cursor",
+          details:
+            "`before` must be a received timestamp and `before_id` a row id, both from a previous next_cursor.",
+        },
+        { status: 400 },
+      );
+    }
     const from = searchParams.get("from");
     const to = searchParams.get("to");
 
@@ -318,11 +340,19 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // (received desc, id desc): a total order, so a cursor never skips or
+    // repeats a row that shares its received timestamp with another.
     let query = supabase
       .from(table)
-      .select("*", { count: "exact" })
+      .select("*", withCount ? { count: "exact" } : undefined)
       .order(schema.receivedKey, { ascending: false })
-      .range(offset, offset + limit - 1);
+      .order(schema.primaryKey, { ascending: false });
+
+    query = cursor
+      ? query
+          .or(cursorFilter(cursor, schema.receivedKey, schema.primaryKey))
+          .limit(limit)
+      : query.range(offset, offset + limit - 1);
 
     // Only a dataset that stores an error mask is filtered on one, rather than
     // the filter being applied to a column that is not there.
@@ -369,9 +399,15 @@ export async function GET(request: NextRequest) {
       environment,
       table,
       data,
-      total: count ?? 0,
+      total: withCount ? (count ?? 0) : null,
       limit,
-      offset,
+      offset: cursor ? null : offset,
+      next_cursor: nextCursor(
+        (data ?? []) as Record<string, unknown>[],
+        limit,
+        schema.receivedKey,
+        schema.primaryKey,
+      ),
     });
   } catch (error) {
     console.error("Error fetching payloads:", error);
