@@ -1,19 +1,21 @@
-import { REE_ENVIRONMENT } from "@/lib/environments";
-import { environmentForDeviceUid } from "@/lib/payload-repository";
-
 /**
- * Relay of the REE device's reports to the other platform.
+ * Relay of device reports to the Dynagrid Logstash relay.
  *
- * A report that lands in `payloads_REE` is also POSTed, byte for byte, to
- * `FORWARD_URL` — the same request this endpoint receives: the raw binary
- * frame as `application/octet-stream`. Nothing is decoded or rebuilt.
+ * Every device report that decoded as a stored format (V1 or V2, with a device
+ * UID) is also POSTed, byte for byte, to the URL in `PAYLOAD_FORWARD_URL` —
+ * the same request this endpoint receives: the raw binary frame as
+ * `application/octet-stream`. Nothing is decoded or rebuilt. Logstash decodes
+ * the frame and sends it to ThingsBoard DEV and PROD, per device
+ * (SW_DynagridCloud_Logstash, glpi-inventory-iot.csv).
+ *
+ * When `PAYLOAD_FORWARD_URL` is not set (or is not an https URL), nothing is
+ * forwarded. The URL lives in the environment, not in the code.
  *
  * It is best-effort: it runs after the device has had its answer, never
  * throws, gives up after `FORWARD_TIMEOUT_MS` and only logs a failure.
  */
 
-export const FORWARD_URL =
-  "https://app.dynagrid.io/api/v1/integrations/http/56e271b4-c9b2-feef-91bb-44262e41caa9";
+export const FORWARD_URL_ENV = "PAYLOAD_FORWARD_URL";
 export const FORWARD_TIMEOUT_MS = 10_000;
 
 const OCTET_STREAM = "application/octet-stream";
@@ -23,29 +25,39 @@ export function isOctetStream(contentType: string | null): boolean {
   return contentType?.split(";")[0].trim().toLowerCase() === OCTET_STREAM;
 }
 
+/** The forward target from the environment, or null when unset or not https. */
+export function forwardUrl(
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  const raw = env[FORWARD_URL_ENV]?.trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw).protocol === "https:" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Only a device report (no `environment` parameter) sent as octet-stream by a
- * device routed to REE is forwarded.
+ * device with a UID is forwarded — whatever environment stores it.
  */
 export function shouldForward(
   deviceUid: string | null,
   contentType: string | null,
   explicitEnvironment: boolean,
 ): boolean {
-  return (
-    !explicitEnvironment &&
-    isOctetStream(contentType) &&
-    environmentForDeviceUid(deviceUid) === REE_ENVIRONMENT
-  );
+  return !explicitEnvironment && isOctetStream(contentType) && !!deviceUid;
 }
 
-/** POST the frame to the other platform. Never rejects. */
+/** POST the frame to the forward target. Never rejects. */
 export async function forwardPayload(
   body: Uint8Array,
+  url: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   try {
-    const response = await fetchImpl(FORWARD_URL, {
+    const response = await fetchImpl(url, {
       method: "POST",
       headers: { "Content-Type": OCTET_STREAM },
       body: body as BodyInit,
