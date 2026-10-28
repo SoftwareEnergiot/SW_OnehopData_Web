@@ -239,6 +239,7 @@ cp .env.example .env
 | `NEXT_PUBLIC_SUPABASE_URL`        | yes\*    | Supabase project URL                                     |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY`   | yes\*    | Supabase anonymous (public) key                          |
 | `SUPABASE_SERVICE_ROLE_KEY`       | no       | Service-role key (server-only; optional admin operations)|
+| `PAYLOAD_FORWARD_URL`             | no       | https URL of the Dynagrid Logstash relay. Every device report (V1/V2, with UID) is copied there byte for byte; empty = no copy |
 
 \* Required for storage and the *Received Payloads* list. The decoder,
 Playground, and `POST /api/payloads` decoding still work without them (payloads
@@ -640,6 +641,7 @@ power stage decodes as unknown.
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
    - `SUPABASE_SERVICE_ROLE_KEY` (optional)
+   - `PAYLOAD_FORWARD_URL` (optional; copy of the device reports to the Logstash relay)
 3. Deploy.
 
 The `POST /api/payloads` route is an App Router Route Handler pinned to the

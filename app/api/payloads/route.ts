@@ -19,7 +19,11 @@ import {
   unsupportedFormat,
 } from "@/lib/payload-insert";
 import { learnDeviceToken, parseBearerToken } from "@/lib/device-auth";
-import { forwardPayload, shouldForward } from "@/lib/payload-forward";
+import {
+  forwardPayload,
+  forwardUrl,
+  shouldForward,
+} from "@/lib/payload-forward";
 import { after, NextRequest, NextResponse } from "next/server";
 
 // Raw binary bodies require the Node.js runtime (not the Edge runtime) so the
@@ -70,9 +74,9 @@ function requestedEnvironment(request: NextRequest) {
  * instead of silent. A rejected write is never retried against another
  * environment.
  *
- * A device report sent as `application/octet-stream` by a device routed to
- * REE is also forwarded, byte for byte, to the other platform
- * (lib/payload-forward) after the response — whatever the storage outcome.
+ * A device report sent as `application/octet-stream` is also forwarded, byte
+ * for byte, to the Logstash relay in `PAYLOAD_FORWARD_URL` (lib/payload-forward)
+ * after the response — whatever the environment and the storage outcome.
  */
 export async function POST(request: NextRequest) {
   const explicitEnvironment =
@@ -111,16 +115,18 @@ export async function POST(request: NextRequest) {
         : new NextResponse(null, { status: 400 });
     }
 
-    // The REE device's report is also relayed, unchanged, to the other
-    // platform — once the device has had its answer (lib/payload-forward).
+    // Every device report is also relayed, unchanged, to the Logstash relay —
+    // once the device has had its answer (lib/payload-forward).
+    const forwardTarget = forwardUrl();
     if (
+      forwardTarget &&
       shouldForward(
         analysis.decoded.device_uid,
         request.headers.get("content-type"),
         explicitEnvironment,
       )
     ) {
-      after(() => forwardPayload(bytes));
+      after(() => forwardPayload(bytes, forwardTarget));
     }
 
     try {
