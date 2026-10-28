@@ -59,7 +59,34 @@ const PAGE_SIZES = [25, 50, 100, 200];
 // Rows pulled per request when gathering a full range for CSV export. Kept at
 // or below the Supabase default row cap so a single page never silently drops
 // rows off the end.
-const EXPORT_CHUNK = 1000;
+const EXPORT_CHUNK = 500;
+const EXPORT_RETRIES = 2;
+
+interface ExportPage {
+  success: boolean;
+  data?: PayloadRow[];
+  next_cursor?: { before: string; beforeId: string } | null;
+  error?: string;
+  details?: string;
+}
+
+// One export page, retried on a failed answer (e.g. a transient database
+// timeout) so a long export is not lost to a single slow request.
+async function fetchExportPage(url: string): Promise<ExportPage> {
+  let lastError = "Failed to load payloads";
+  for (let attempt = 0; attempt <= EXPORT_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url, { cache: "no-store" });
+      const result: ExportPage = await response.json();
+      if (result.success) return result;
+      lastError = result.details ?? result.error ?? lastError;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : lastError;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+  }
+  throw new Error(lastError);
+}
 
 export function ReceivedPayloads() {
   // The dataset this view reads. Guaranteed present: the dashboard only
@@ -105,6 +132,7 @@ export function ReceivedPayloads() {
   // True while a CSV export is gathering rows, to disable the button and show
   // progress.
   const [exporting, setExporting] = useState(false);
+  const [exportedRows, setExportedRows] = useState(0);
 
   const fetchPayloads = useCallback(async () => {
     setLoading(true);
@@ -213,12 +241,15 @@ export function ReceivedPayloads() {
 
   // Fetch every payload in the current range (all pages), most-recent first.
   const fetchAllInRange = useCallback(async (): Promise<PayloadRow[]> => {
+    // Cursor pages with no exact count (lib/payload-cursor): each page costs
+    // the same however deep the export goes, so a long range no longer hits
+    // the database statement timeout after the first page.
     const all: PayloadRow[] = [];
-    let offset = 0;
+    let cursor: { before: string; beforeId: string } | null = null;
     for (;;) {
       const params = new URLSearchParams({
         limit: String(EXPORT_CHUNK),
-        offset: String(offset),
+        count: "none",
       });
       const fromBound = createdAtBoundFromInput(from, "from");
       if (fromBound) params.set("from", fromBound);
@@ -226,21 +257,17 @@ export function ReceivedPayloads() {
       if (toBound) params.set("to", toBound);
       if (deviceUid) params.set("device_uid", deviceUid);
       params.set(ENVIRONMENT_PARAM, environment.name);
-
-      const response = await fetch(`/api/payloads?${params.toString()}`, {
-        cache: "no-store",
-      });
-      const result = await response.json();
-      if (!result.success) {
-        throw new Error(result.details ?? result.error ?? "Failed to load payloads");
+      if (cursor) {
+        params.set("before", cursor.before);
+        params.set("before_id", cursor.beforeId);
       }
+
+      const result = await fetchExportPage(`/api/payloads?${params.toString()}`);
       const batch: PayloadRow[] = result.data ?? [];
       all.push(...batch);
-      const count: number = result.total ?? all.length;
-      // Stop once we've collected the reported total, or a short page signals
-      // the end (guards against a total that lags behind the data).
-      if (all.length >= count || batch.length < EXPORT_CHUNK) break;
-      offset += EXPORT_CHUNK;
+      setExportedRows(all.length);
+      cursor = result.next_cursor ?? null;
+      if (!cursor || batch.length < EXPORT_CHUNK) break;
     }
     return all;
   }, [from, to, deviceUid, environment.name]);
@@ -257,6 +284,7 @@ export function ReceivedPayloads() {
   // Gather the full range and download it as CSV, with the table's columns.
   const handleDownloadCsv = useCallback(async () => {
     setExporting(true);
+    setExportedRows(0);
     try {
       const data = await fetchAllInRange();
       if (data.length === 0) {
@@ -464,7 +492,9 @@ export function ReceivedPayloads() {
                 className="gap-2"
               >
                 <Download className="h-4 w-4" />
-                {exporting ? "Exporting…" : "Download CSV"}
+                {exporting
+                  ? `Exporting… ${exportedRows.toLocaleString()} rows`
+                  : "Download CSV"}
               </Button>
               <Label
                 htmlFor="page-size"

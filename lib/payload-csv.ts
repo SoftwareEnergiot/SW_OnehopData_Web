@@ -43,5 +43,7 @@ export function downloadCsv(content: string, filename: string): void {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  // Revoking at once can cancel the download of a large file in some browsers:
+  // the URL is released once the browser has had time to start reading it.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
