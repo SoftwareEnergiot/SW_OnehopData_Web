@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   FORWARD_URL_ENV,
+  forwardConfig,
   forwardPayload,
   forwardUrl,
   isOctetStream,
@@ -42,6 +43,19 @@ describe("forwardUrl", () => {
     expect(forwardUrl({ [FORWARD_URL_ENV]: "" })).toBeNull();
     expect(forwardUrl({ [FORWARD_URL_ENV]: "http://relay.example.test/" })).toBeNull();
     expect(forwardUrl({ [FORWARD_URL_ENV]: "relay.example.test" })).toBeNull();
+  });
+});
+
+describe("forwardConfig", () => {
+  it("accepts a quoted value pasted in the dashboard", () => {
+    expect(forwardConfig({ [FORWARD_URL_ENV]: `"${URL_OK}"` })).toEqual({ ok: true, url: URL_OK });
+    expect(forwardConfig({ [FORWARD_URL_ENV]: ` '${URL_OK}' ` })).toEqual({ ok: true, url: URL_OK });
+  });
+
+  it("says why forwarding is off", () => {
+    expect(forwardConfig({})).toEqual({ ok: false, reason: "unset" });
+    expect(forwardConfig({ [FORWARD_URL_ENV]: "etl-dev.dynagrid.io" })).toEqual({ ok: false, reason: "not-a-url" });
+    expect(forwardConfig({ [FORWARD_URL_ENV]: "http://relay.example.test/" })).toEqual({ ok: false, reason: "not-https" });
   });
 });
 

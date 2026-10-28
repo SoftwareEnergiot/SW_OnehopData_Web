@@ -25,17 +25,51 @@ export function isOctetStream(contentType: string | null): boolean {
   return contentType?.split(";")[0].trim().toLowerCase() === OCTET_STREAM;
 }
 
-/** The forward target from the environment, or null when unset or not https. */
+export type ForwardConfig =
+  | { ok: true; url: string }
+  | { ok: false; reason: "unset" | "not-a-url" | "not-https" };
+
+/**
+ * Reads the forward target. Surrounding quotes and spaces (a frequent paste
+ * mistake in the Vercel dashboard) are removed; anything else that is not an
+ * https URL is reported, never guessed.
+ */
+export function forwardConfig(
+  env: Record<string, string | undefined> = process.env,
+): ForwardConfig {
+  const raw = env[FORWARD_URL_ENV]?.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
+  if (!raw) return { ok: false, reason: "unset" };
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { ok: false, reason: "not-a-url" };
+  }
+  return parsed.protocol === "https:"
+    ? { ok: true, url: raw }
+    : { ok: false, reason: "not-https" };
+}
+
+let reported = false;
+
+/**
+ * The forward target, or null when forwarding is off. The first call of each
+ * server instance logs whether forwarding is on (host only) or why it is off,
+ * so a wrong value in the dashboard shows up in the runtime logs.
+ */
 export function forwardUrl(
   env: Record<string, string | undefined> = process.env,
 ): string | null {
-  const raw = env[FORWARD_URL_ENV]?.trim();
-  if (!raw) return null;
-  try {
-    return new URL(raw).protocol === "https:" ? raw : null;
-  } catch {
-    return null;
+  const config = forwardConfig(env);
+  if (!reported) {
+    reported = true;
+    if (config.ok) {
+      console.info(`Payload forward: on, to ${new URL(config.url).host}`);
+    } else {
+      console.warn(`Payload forward: off (${FORWARD_URL_ENV} ${config.reason})`);
+    }
   }
+  return config.ok ? config.url : null;
 }
 
 /**
