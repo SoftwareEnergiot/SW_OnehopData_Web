@@ -30,6 +30,7 @@ import { ViewPicker } from "@/components/view-picker";
 import { analyzePayload, hexToBytes } from "@/lib/payload-decoder";
 import { createdAtBoundFromInput, formatCreatedAt } from "@/lib/utils";
 import { buildCsv, downloadCsv } from "@/lib/payload-csv";
+import { exportRange } from "@/lib/payload-export";
 import { NO_DEVICE_UID } from "@/lib/payload-filters";
 import { ENVIRONMENT_PARAM } from "@/lib/environments";
 import { columnValue, fieldLabel, fieldOf } from "@/lib/payload-schemas";
@@ -59,35 +60,6 @@ const PAGE_SIZES = [25, 50, 100, 200];
 // Rows pulled per request when gathering a full range for CSV export. Kept at
 // or below the Supabase default row cap so a single page never silently drops
 // rows off the end.
-const EXPORT_CHUNK = 500;
-const EXPORT_RETRIES = 2;
-
-interface ExportPage {
-  success: boolean;
-  data?: PayloadRow[];
-  next_cursor?: { before: string; beforeId: string } | null;
-  error?: string;
-  details?: string;
-}
-
-// One export page, retried on a failed answer (e.g. a transient database
-// timeout) so a long export is not lost to a single slow request.
-async function fetchExportPage(url: string): Promise<ExportPage> {
-  let lastError = "Failed to load payloads";
-  for (let attempt = 0; attempt <= EXPORT_RETRIES; attempt++) {
-    try {
-      const response = await fetch(url, { cache: "no-store" });
-      const result: ExportPage = await response.json();
-      if (result.success) return result;
-      lastError = result.details ?? result.error ?? lastError;
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : lastError;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
-  }
-  throw new Error(lastError);
-}
-
 export function ReceivedPayloads() {
   // The dataset this view reads. Guaranteed present: the dashboard only
   // renders behind <EnvironmentGuard>.
@@ -133,6 +105,7 @@ export function ReceivedPayloads() {
   // progress.
   const [exporting, setExporting] = useState(false);
   const [exportedRows, setExportedRows] = useState(0);
+  const [exportReached, setExportReached] = useState<Date | null>(null);
 
   const fetchPayloads = useCallback(async () => {
     setLoading(true);
@@ -241,36 +214,44 @@ export function ReceivedPayloads() {
 
   // Fetch every payload in the current range (all pages), most-recent first.
   const fetchAllInRange = useCallback(async (): Promise<PayloadRow[]> => {
-    // Cursor pages with no exact count (lib/payload-cursor): each page costs
-    // the same however deep the export goes, so a long range no longer hits
-    // the database statement timeout after the first page.
-    const all: PayloadRow[] = [];
-    let cursor: { before: string; beforeId: string } | null = null;
-    for (;;) {
-      const params = new URLSearchParams({
-        limit: String(EXPORT_CHUNK),
-        count: "none",
-      });
-      const fromBound = createdAtBoundFromInput(from, "from");
-      if (fromBound) params.set("from", fromBound);
-      const toBound = createdAtBoundFromInput(to, "to");
-      if (toBound) params.set("to", toBound);
-      if (deviceUid) params.set("device_uid", deviceUid);
-      params.set(ENVIRONMENT_PARAM, environment.name);
-      if (cursor) {
-        params.set("before", cursor.before);
-        params.set("before_id", cursor.beforeId);
-      }
-
-      const result = await fetchExportPage(`/api/payloads?${params.toString()}`);
-      const batch: PayloadRow[] = result.data ?? [];
-      all.push(...batch);
-      setExportedRows(all.length);
-      cursor = result.next_cursor ?? null;
-      if (!cursor || batch.length < EXPORT_CHUNK) break;
-    }
-    return all;
-  }, [from, to, deviceUid, environment.name]);
+    // Time windows walked newest → oldest, cursor pages whose size adapts to
+    // the database timeout, empty periods skipped, merged into one result
+    // (lib/payload-export).
+    const fromBound = createdAtBoundFromInput(from, "from");
+    const toBound = createdAtBoundFromInput(to, "to");
+    return exportRange<PayloadRow>({
+      from: fromBound ? new Date(fromBound) : null,
+      to: toBound ? new Date(toBound) : null,
+      receivedKey: schema.receivedKey,
+      primaryKey: schema.primaryKey,
+      fetchPage: async (request) => {
+        const params = new URLSearchParams({
+          limit: String(request.limit),
+          count: "none",
+          to: request.to,
+        });
+        if (request.from) params.set("from", request.from);
+        if (deviceUid) params.set("device_uid", deviceUid);
+        params.set(ENVIRONMENT_PARAM, environment.name);
+        if (request.cursor) {
+          params.set("before", request.cursor.before);
+          params.set("before_id", request.cursor.beforeId);
+        }
+        const response = await fetch(`/api/payloads?${params.toString()}`, {
+          cache: "no-store",
+        });
+        const result = await response.json().catch(() => ({ success: false }));
+        if (!result.success) {
+          throw new Error(result.details ?? result.error ?? `HTTP ${response.status}`);
+        }
+        return { data: result.data ?? [], next_cursor: result.next_cursor ?? null };
+      },
+      onProgress: ({ rows: count, reached }) => {
+        setExportedRows(count);
+        setExportReached(reached);
+      },
+    });
+  }, [from, to, deviceUid, environment.name, schema]);
 
   // The CSV carries exactly the table's columns, in the table's order.
   const csvColumns = useMemo(
@@ -285,6 +266,7 @@ export function ReceivedPayloads() {
   const handleDownloadCsv = useCallback(async () => {
     setExporting(true);
     setExportedRows(0);
+    setExportReached(null);
     try {
       const data = await fetchAllInRange();
       if (data.length === 0) {
@@ -493,7 +475,7 @@ export function ReceivedPayloads() {
               >
                 <Download className="h-4 w-4" />
                 {exporting
-                  ? `Exporting… ${exportedRows.toLocaleString()} rows`
+                  ? `Exporting… ${exportedRows.toLocaleString()} rows${exportReached ? ` · back to ${exportReached.toISOString().slice(0, 10)}` : ""}`
                   : "Download CSV"}
               </Button>
               <Label
