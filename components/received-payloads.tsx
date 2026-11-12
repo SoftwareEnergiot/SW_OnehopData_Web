@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import {
   Card,
@@ -31,6 +31,8 @@ import { createdAtBoundFromInput, formatCreatedAt } from "@/lib/utils";
 import { buildCsv, downloadCsv } from "@/lib/payload-csv";
 import { exportRange } from "@/lib/payload-export";
 import { NO_DEVICE_UID } from "@/lib/payload-filters";
+import type { PayloadCursor } from "@/lib/payload-cursor";
+import { appendBatch, nextBatchSize } from "@/lib/payload-list";
 import { ENVIRONMENT_PARAM } from "@/lib/environments";
 import { columnValue, fieldLabel, fieldOf } from "@/lib/payload-schemas";
 import type { PayloadRecord, PayloadRow } from "@/lib/types";
@@ -43,18 +45,16 @@ interface DeviceOption {
 }
 import { toast } from "sonner";
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
   Columns3,
   Database,
   Download,
+  Hash,
   RefreshCw,
   X,
 } from "lucide-react";
-
-const PAGE_SIZES = [25, 50, 100, 200];
 
 // Loaded on demand, so the first paint ships only the table: the charts once
 // they are about to scroll into view, the inspectors once a row is opened.
@@ -99,9 +99,21 @@ export function ReceivedPayloads() {
     [schema, columnsView.selected],
   );
 
+  // The rows loaded so far, newest first: a first small batch, then whatever
+  // the reader asked for with "Load more" (lib/payload-list).
   const [rows, setRows] = useState<PayloadRow[]>([]);
-  const [total, setTotal] = useState(0);
+  // Where the next batch starts; null once the oldest row has been loaded.
+  const [cursor, setCursor] = useState<PayloadCursor | null>(null);
+  const [batchesLoaded, setBatchesLoaded] = useState(0);
+  // The number of rows in the filter, only once the reader asked for it: an
+  // exact count of a large table outlasts the database timeout.
+  const [total, setTotal] = useState<number | null>(null);
+  const [counting, setCounting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Bumped by every first-batch load, so a batch or a count that answers after
+  // the filter changed is dropped instead of mixed into the new rows.
+  const generation = useRef(0);
   // Set once the first page has arrived. The device list and the charts wait
   // for it, so opening the dashboard starts one request instead of three.
   const [firstPageLoaded, setFirstPageLoaded] = useState(false);
@@ -117,13 +129,6 @@ export function ReceivedPayloads() {
   const [deviceUid, setDeviceUid] = useState("");
   const [devices, setDevices] = useState<DeviceOption[]>([]);
   const [devicesWithoutUid, setDevicesWithoutUid] = useState(false);
-  // Paging through every stored payload in the selected range.
-  const [pageSize, setPageSize] = useState(50);
-  const [page, setPage] = useState(0);
-  // Set when the inspector steps past the edge of the current page: once the
-  // next page has loaded, select its first ("first") or last ("last") row so
-  // navigation continues seamlessly across the whole range.
-  const [selectEdge, setSelectEdge] = useState<"first" | "last" | null>(null);
   // Bumped by Refresh so the charts refetch alongside the table.
   const [refreshKey, setRefreshKey] = useState(0);
   // True while a CSV export is gathering rows, to disable the button and show
@@ -132,44 +137,143 @@ export function ReceivedPayloads() {
   const [exportedRows, setExportedRows] = useState(0);
   const [exportReached, setExportReached] = useState<Date | null>(null);
 
-  const fetchPayloads = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({
-        limit: String(pageSize),
-        offset: String(page * pageSize),
-      });
-      const fromBound = createdAtBoundFromInput(from, "from");
-      if (fromBound) params.set("from", fromBound);
-      const toBound = createdAtBoundFromInput(to, "to");
-      if (toBound) params.set("to", toBound);
-      if (deviceUid) params.set("device_uid", deviceUid);
-      // Named on every request, so a row can only ever come from the active
-      // environment's table.
-      params.set(ENVIRONMENT_PARAM, environment.name);
+  // A row's identity, read through the schema's primary key.
+  const rowId = useCallback(
+    (row: PayloadRow) => String(columnValue(row, schema.primaryKey)),
+    [schema.primaryKey],
+  );
 
+  // The table's filter as query parameters, without paging. The environment
+  // is named on every request, so a row can only ever come from the active
+  // environment's table.
+  const filterParams = useCallback(() => {
+    const params = new URLSearchParams();
+    const fromBound = createdAtBoundFromInput(from, "from");
+    if (fromBound) params.set("from", fromBound);
+    const toBound = createdAtBoundFromInput(to, "to");
+    if (toBound) params.set("to", toBound);
+    if (deviceUid) params.set("device_uid", deviceUid);
+    params.set(ENVIRONMENT_PARAM, environment.name);
+    return params;
+  }, [from, to, deviceUid, environment.name]);
+
+  // One batch of rows, without a count. Throws with the server's message.
+  const fetchBatch = useCallback(
+    async (limit: number, after: PayloadCursor | null) => {
+      const params = filterParams();
+      params.set("limit", String(limit));
+      params.set("count", "none");
+      if (after) {
+        params.set("before", after.before);
+        params.set("before_id", after.beforeId);
+      }
       const response = await fetch(`/api/payloads?${params.toString()}`, {
         cache: "no-store",
       });
-      const result = await response.json();
-      if (result.success) {
-        setRows(result.data ?? []);
-        setTotal(result.total ?? 0);
-      } else {
-        toast.error(result.details ?? result.error ?? "Failed to load payloads");
+      const result = await response.json().catch(() => ({ success: false }));
+      if (!result.success) {
+        throw new Error(
+          result.details ?? result.error ?? `Failed to load payloads (HTTP ${response.status})`,
+        );
       }
-    } catch {
-      // The list needs Supabase configured; fail quietly with a hint.
-      toast.error("Could not load stored payloads (is Supabase configured?)");
+      return {
+        data: (result.data ?? []) as PayloadRow[],
+        next: (result.next_cursor ?? null) as PayloadCursor | null,
+      };
+    },
+    [filterParams],
+  );
+
+  // The first batch: what opening the dashboard, a filter change or Refresh
+  // loads. Replaces whatever was loaded before.
+  const fetchPayloads = useCallback(async () => {
+    const current = ++generation.current;
+    setLoading(true);
+    setLoadingMore(false);
+    setTotal(null);
+    setCounting(false);
+    try {
+      const { data, next } = await fetchBatch(nextBatchSize(0), null);
+      if (current !== generation.current) return;
+      setRows(data);
+      setCursor(next);
+      setBatchesLoaded(1);
+    } catch (error) {
+      if (current !== generation.current) return;
+      setRows([]);
+      setCursor(null);
+      setBatchesLoaded(0);
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Could not load stored payloads (is Supabase configured?)",
+      );
     } finally {
-      setLoading(false);
-      setFirstPageLoaded(true);
+      if (current === generation.current) {
+        setLoading(false);
+        setFirstPageLoaded(true);
+      }
     }
-  }, [from, to, deviceUid, page, pageSize, environment.name]);
+  }, [fetchBatch]);
 
   useEffect(() => {
     fetchPayloads();
   }, [fetchPayloads]);
+
+  // The next, larger batch, appended below the rows already shown. With
+  // `selectFirst`, the inspector moves onto its first row (stepping "Older"
+  // past the last loaded row).
+  const loadMore = useCallback(
+    async (selectFirst = false) => {
+      if (!cursor || loadingMore || loading) return;
+      const current = generation.current;
+      setLoadingMore(true);
+      try {
+        const { data, next } = await fetchBatch(nextBatchSize(batchesLoaded), cursor);
+        if (current !== generation.current) return;
+        setRows((prev) => appendBatch(prev, data, rowId));
+        setCursor(next);
+        setBatchesLoaded((n) => n + 1);
+        if (selectFirst && data.length > 0) setSelectedId(rowId(data[0]));
+      } catch (error) {
+        if (current !== generation.current) return;
+        toast.error(error instanceof Error ? error.message : "Could not load more payloads");
+      } finally {
+        if (current === generation.current) setLoadingMore(false);
+      }
+    },
+    [cursor, loadingMore, loading, fetchBatch, batchesLoaded, rowId],
+  );
+
+  // The exact number of rows in the filter, only on request. On a large,
+  // unfiltered table it can outlast the database timeout; then it says so
+  // instead of failing the table.
+  const countTotal = useCallback(async () => {
+    const current = generation.current;
+    setCounting(true);
+    try {
+      const params = filterParams();
+      params.set("limit", "1");
+      const response = await fetch(`/api/payloads?${params.toString()}`, {
+        cache: "no-store",
+      });
+      const result = await response.json().catch(() => ({ success: false }));
+      if (current !== generation.current) return;
+      if (result.success && typeof result.total === "number") {
+        setTotal(result.total);
+      } else {
+        toast.error(
+          `Too many ${schema.rowNounPlural} to count in time. Narrow the time range or pick a device to get a total.`,
+        );
+      }
+    } catch {
+      if (current === generation.current) {
+        toast.error(`Could not count the ${schema.rowNounPlural}.`);
+      }
+    } finally {
+      if (current === generation.current) setCounting(false);
+    }
+  }, [filterParams, schema.rowNounPlural]);
 
   // The devices the filter can offer. Refetched on Refresh, so a device that
   // sends its first payload shows up without reloading the page.
@@ -193,49 +297,21 @@ export function ReceivedPayloads() {
     if (firstPageLoaded) fetchDevices();
   }, [fetchDevices, firstPageLoaded]);
 
-  // A row's identity, read through the schema's primary key.
-  const rowId = useCallback(
-    (row: PayloadRow) => String(columnValue(row, schema.primaryKey)),
-    [schema.primaryKey],
-  );
-
-  // Land on the requested edge of a page the inspector just navigated into.
-  useEffect(() => {
-    if (!selectEdge || rows.length === 0) return;
-    const row = selectEdge === "first" ? rows[0] : rows[rows.length - 1];
-    setSelectedId(rowId(row));
-    setSelectEdge(null);
-  }, [rows, selectEdge, rowId]);
-
-  // Any change to the range or the page size restarts paging from the first
-  // page, so the offset can never point past the new result set.
-  const changeFrom = useCallback((value: string) => {
-    setFrom(value);
-    setPage(0);
-  }, []);
-
-  const changeTo = useCallback((value: string) => {
-    setTo(value);
-    setPage(0);
-  }, []);
+  // Any change to the filter reloads the first batch (fetchPayloads depends on
+  // it), so the rows shown always belong to the current filter.
+  const changeFrom = useCallback((value: string) => setFrom(value), []);
+  const changeTo = useCallback((value: string) => setTo(value), []);
 
   const changeDevice = useCallback((value: string) => {
     setDeviceUid(value);
-    setPage(0);
     // The inspected payload may belong to another device.
     setSelectedId(null);
-  }, []);
-
-  const changePageSize = useCallback((value: number) => {
-    setPageSize(value);
-    setPage(0);
   }, []);
 
   const clearFilter = useCallback(() => {
     setFrom("");
     setTo("");
     setDeviceUid("");
-    setPage(0);
   }, []);
 
   // Fetch every payload in the current range (all pages), most-recent first.
@@ -320,9 +396,7 @@ export function ReceivedPayloads() {
   }, [fetchAllInRange, csvColumns, schema]);
 
   const hasFilter = from !== "" || to !== "" || deviceUid !== "";
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  const firstRowNumber = total === 0 ? 0 : page * pageSize + 1;
-  const lastRowNumber = page * pageSize + rows.length;
+  const hasMore = cursor !== null;
 
   const selectedIndex = rows.findIndex((row) => rowId(row) === selectedId);
   const selected = selectedIndex === -1 ? null : rows[selectedIndex];
@@ -337,13 +411,14 @@ export function ReceivedPayloads() {
     [selected, schema.capabilities.rawPayloadInspector],
   );
 
-  // Position of the selection among *all* payloads in the range, not just the
-  // rows of the current page.
-  const selectedNumber = page * pageSize + selectedIndex + 1;
-  const hasNewer = selectedIndex > 0 || page > 0;
-  const hasOlder = selectedNumber < total;
+  // Position of the selection among the rows loaded (newest first). Every
+  // newer row is always loaded, so this is also its position in the filter.
+  const selectedNumber = selectedIndex + 1;
+  const hasNewer = selectedIndex > 0;
+  const hasOlder = selectedIndex !== -1 && (selectedIndex < rows.length - 1 || hasMore);
 
-  // Step through the payloads one at a time, crossing page boundaries so the
+  // Step through the payloads one at a time. Stepping "Older" past the last
+  // loaded row loads the next batch and lands on its first row, so the
   // inspector can walk every stored payload in the range.
   const stepSelection = useCallback(
     (delta: 1 | -1) => {
@@ -351,15 +426,11 @@ export function ReceivedPayloads() {
       const next = rows[selectedIndex + delta];
       if (next) {
         setSelectedId(rowId(next));
-      } else if (delta === 1 && page < pageCount - 1) {
-        setSelectEdge("first");
-        setPage((p) => p + 1);
-      } else if (delta === -1 && page > 0) {
-        setSelectEdge("last");
-        setPage((p) => p - 1);
+      } else if (delta === 1 && hasMore) {
+        loadMore(true);
       }
     },
-    [rows, selectedIndex, page, pageCount, rowId],
+    [rows, selectedIndex, rowId, hasMore, loadMore],
   );
 
   return (
@@ -509,24 +580,6 @@ export function ReceivedPayloads() {
                   ? `Exporting… ${exportedRows.toLocaleString()} rows${exportReached ? ` · back to ${exportReached.toISOString().slice(0, 10)}` : ""}`
                   : "Download CSV"}
               </Button>
-              <Label
-                htmlFor="page-size"
-                className="text-xs text-muted-foreground"
-              >
-                Per page
-              </Label>
-              <select
-                id="page-size"
-                value={pageSize}
-                onChange={(e) => changePageSize(Number(e.target.value))}
-                className="h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-              >
-                {PAGE_SIZES.map((size) => (
-                  <option key={size} value={size}>
-                    {size}
-                  </option>
-                ))}
-              </select>
             </div>
           </CardAction>
         </CardHeader>
@@ -603,57 +656,50 @@ export function ReceivedPayloads() {
 
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs text-muted-foreground">
-                  Showing{" "}
-                  <span className="font-mono">
-                    {firstRowNumber}–{lastRowNumber}
-                  </span>{" "}
-                  of <span className="font-mono">{total}</span>{" "}
-                  {schema.rowNoun}(s)
-                  {hasFilter ? " in the selected time range" : ""} · page{" "}
-                  <span className="font-mono">{page + 1}</span> of{" "}
-                  <span className="font-mono">{pageCount}</span>
+                  Showing the{" "}
+                  <span className="font-mono">{rows.length.toLocaleString()}</span>{" "}
+                  most recent {schema.rowNoun}(s)
+                  {total !== null && (
+                    <>
+                      {" "}of{" "}
+                      <span className="font-mono">{total.toLocaleString()}</span>
+                    </>
+                  )}
+                  {hasFilter ? " in the selected filter" : ""}
+                  {!hasMore && " · all loaded"}
                 </p>
-                <div className="flex items-center gap-1">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setPage(0)}
-                    disabled={page === 0}
-                    aria-label="First page"
-                  >
-                    <ChevronsLeft className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setPage((p) => Math.max(0, p - 1))}
-                    disabled={page === 0}
-                    className="gap-1"
-                  >
-                    <ChevronLeft className="h-4 w-4" />
-                    Previous
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      setPage((p) => Math.min(pageCount - 1, p + 1))
-                    }
-                    disabled={page >= pageCount - 1}
-                    className="gap-1"
-                  >
-                    Next
-                    <ChevronRight className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setPage(pageCount - 1)}
-                    disabled={page >= pageCount - 1}
-                    aria-label="Last page"
-                  >
-                    <ChevronsRight className="h-4 w-4" />
-                  </Button>
+                <div className="flex items-center gap-2">
+                  {total === null && hasMore && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={countTotal}
+                      disabled={counting}
+                      title={
+                        hasFilter
+                          ? "Count every row in the filter"
+                          : "Counting a large table can time out; a time range or a device makes it fast"
+                      }
+                      className="gap-2"
+                    >
+                      <Hash className="h-4 w-4" />
+                      {counting ? "Counting…" : "Count total"}
+                    </Button>
+                  )}
+                  {hasMore && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => loadMore()}
+                      disabled={loadingMore}
+                      className="gap-2"
+                    >
+                      <ChevronDown className="h-4 w-4" />
+                      {loadingMore
+                        ? "Loading…"
+                        : `Load ${nextBatchSize(batchesLoaded)} more`}
+                    </Button>
+                  )}
                 </div>
               </div>
             </>
@@ -677,7 +723,9 @@ export function ReceivedPayloads() {
               <div className="flex items-center gap-2">
                 <span className="text-xs text-muted-foreground">
                   <span className="font-mono">{selectedNumber}</span> of{" "}
-                  <span className="font-mono">{total}</span>
+                  <span className="font-mono">
+                    {total ?? `${rows.length}${hasMore ? "+" : ""}`}
+                  </span>
                 </span>
                 <Button
                   variant="outline"
@@ -693,7 +741,7 @@ export function ReceivedPayloads() {
                   variant="outline"
                   size="sm"
                   onClick={() => stepSelection(1)}
-                  disabled={!hasOlder || loading}
+                  disabled={!hasOlder || loading || loadingMore}
                   className="gap-1"
                 >
                   Older

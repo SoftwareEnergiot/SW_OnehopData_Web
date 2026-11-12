@@ -574,6 +574,15 @@ they are about to scroll into view (`components/lazy-mount.tsx`). The charts,
 the payload inspectors, the Playground and the Remote config tab are split
 into their own chunks and downloaded only when shown.
 
+The table never asks for an exact count up front: on a large, unfiltered
+`public.payloads` the `count(*)` alone outlasts the database statement timeout
+and failed the whole request, while reading the newest rows is fast. It loads
+the 25 most recent rows with `count=none`, and **Load more** appends further
+batches by cursor (`next_cursor`), each larger than the last — 50, 100, then
+200 at a time ([`lib/payload-list.ts`](lib/payload-list.ts)). The total is
+counted only when **Count total** is pressed; with a time range or a device
+selected it is fast, and if it times out the table stays as it is.
+
 ## Remote config
 
 The **Remote config** tab edits, per device, the configuration file the device
