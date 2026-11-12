@@ -25,12 +25,22 @@ import {
   forwardUrl,
   shouldForward,
 } from "@/lib/payload-forward";
+import {
+  ingestDeviceReport,
+  INLINE_STORE_BUDGET_MS,
+  settleWithin,
+} from "@/lib/payload-ingest";
+import { createIngestClient } from "@/lib/supabase/ingest";
+import type { PayloadAnalysis } from "@/lib/payload-decoder";
 import { after, NextRequest, NextResponse } from "next/server";
 
 // Raw binary bodies require the Node.js runtime (not the Edge runtime) so the
 // full request buffer is available via request.arrayBuffer().
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Room for a write that outlives the device's answer (lib/payload-ingest) to
+// finish, or to reach the retry queue, inside after().
+export const maxDuration = 60;
 
 // Map a decode error code to an HTTP status.
 function statusForDecodeError(code: string): number {
@@ -64,9 +74,11 @@ function requestedEnvironment(request: NextRequest) {
  * Devices send no `environment`, and the endpoint then picks the table from the
  * payload itself: a decoded device UID listed in the REE schema's
  * `writeDeviceUids` stores the payload in `payloads_REE`; any other device is
- * stored in `public.payloads`. A
- * storage failure on that path stays best-effort, as it always has: the payload
- * decoded, so the request is still accepted with 204 and no body.
+ * stored in `public.payloads`. The device gets its 204 once the payload has
+ * decoded and the write has finished or `INLINE_STORE_BUDGET_MS` has passed,
+ * whichever comes first: a burst of devices reporting at once no longer waits
+ * on the database. A write that fails is parked in the retry queue, never
+ * redirected to the other table (lib/payload-ingest).
  *
  * A request that *names* an environment comes from the dashboard. That choice
  * is honoured as given — no UID-based rerouting — and a storage failure is then
@@ -130,26 +142,27 @@ export async function POST(request: NextRequest) {
       after(() => forwardPayload(bytes, forwardTarget));
     }
 
+    // A device is on the other end: answer it without waiting on the database.
+    if (!explicitEnvironment) {
+      return await acceptDeviceReport(request, analysis);
+    }
+
     try {
       const supabase = await createClient();
 
-      // A device's report carries both its Bearer token and its UID: remember
-      // the pairing, so GET /api/config can tell which device is polling. Only
-      // the token's hash is stored, and this never throws or changes the
-      // answer below.
+      // Requests from the dashboard rarely carry a Bearer token, but one that
+      // does is learned the same way a device's is.
       const token = parseBearerToken(request.headers.get("authorization"));
       if (token) {
         await learnDeviceToken(supabase, token, analysis.decoded.device_uid);
       }
 
-      const named = new URL(request.url).searchParams.get(ENVIRONMENT_PARAM);
-      // Named explicitly -> honour it. Unaddressed -> route on the device UID.
-      const target =
-        named ?? environmentForDeviceUid(analysis.decoded.device_uid);
-      const resolution = resolveEnvironment(target);
+      // Named explicitly -> honoured as given, no UID-based rerouting.
+      const resolution = resolveEnvironment(
+        new URL(request.url).searchParams.get(ENVIRONMENT_PARAM),
+      );
 
       if (!resolution.ok) {
-        // An unknown environment can only come from an explicit parameter.
         return NextResponse.json(
           {
             success: false,
@@ -176,23 +189,18 @@ export async function POST(request: NextRequest) {
             `Payload not storable in ${table}:`,
             error.message,
           );
-          // Explicit -> the caller asked for this table and must hear why it
-          // could not be used. Unaddressed -> a device is on the other end and
-          // the payload did decode, so the contract stays what it has always
-          // been: 204, with the reason in the server log.
-          if (explicitEnvironment) {
-            return NextResponse.json(
-              {
-                success: false,
-                environment,
-                table,
-                error: "Payload cannot be stored in this environment",
-                details: error.message,
-              },
-              { status: 422 },
-            );
-          }
-          return new NextResponse(null, { status: 204 });
+          // The caller asked for this table and must hear why it could not
+          // be used.
+          return NextResponse.json(
+            {
+              success: false,
+              environment,
+              table,
+              error: "Payload cannot be stored in this environment",
+              details: error.message,
+            },
+            { status: 422 },
+          );
         }
         throw error;
       }
@@ -206,50 +214,43 @@ export async function POST(request: NextRequest) {
         );
         // The dashboard must see the rejection — the REE device-UID constraint
         // is enforced here and nowhere else.
-        if (explicitEnvironment) {
-          return NextResponse.json(
-            {
-              success: false,
-              environment,
-              table,
-              error: "The database rejected the write",
-              details: error.message,
-              hint: schema.writeDeviceUids?.length
-                ? `${table} only accepts payloads from: ${schema.writeDeviceUids.join(", ")}.`
-                : undefined,
-            },
-            { status: 422 },
-          );
-        }
-      } else if (explicitEnvironment) {
         return NextResponse.json(
           {
-            success: true,
+            success: false,
             environment,
             table,
-            stored: rows.length,
+            error: "The database rejected the write",
+            details: error.message,
+            hint: schema.writeDeviceUids?.length
+              ? `${table} only accepts payloads from: ${schema.writeDeviceUids.join(", ")}.`
+              : undefined,
           },
-          { status: 201 },
+          { status: 422 },
         );
       }
+      return NextResponse.json(
+        {
+          success: true,
+          environment,
+          table,
+          stored: rows.length,
+        },
+        { status: 201 },
+      );
     } catch (error) {
       console.error(
         "Skipping payload storage:",
         error instanceof Error ? error.message : "Unknown error",
       );
-      if (explicitEnvironment) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "Could not reach the database",
-            details: error instanceof Error ? error.message : "Unknown error",
-          },
-          { status: 500 },
-        );
-      }
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Could not reach the database",
+          details: error instanceof Error ? error.message : "Unknown error",
+        },
+        { status: 500 },
+      );
     }
-
-    return new NextResponse(null, { status: 204 });
   } catch (error) {
     console.error("Error processing payload:", error);
     return explicitEnvironment
@@ -263,6 +264,83 @@ export async function POST(request: NextRequest) {
         )
       : new NextResponse(null, { status: 500 });
   }
+}
+
+/**
+ * Store an unaddressed device report and answer the device with 204.
+ *
+ * The table follows the device UID. The write goes through the per-environment
+ * queue of lib/payload-ingest: the answer waits for it at most
+ * `INLINE_STORE_BUDGET_MS`, and whatever is left — the write, or its retry
+ * entry — finishes in after(). The device's token is learned only once the
+ * report is stored, so the remote-config bookkeeping never delays a report.
+ */
+async function acceptDeviceReport(
+  request: NextRequest,
+  analysis: PayloadAnalysis,
+): Promise<NextResponse> {
+  const accepted = () => new NextResponse(null, { status: 204 });
+  const deviceUid = analysis.decoded.device_uid;
+
+  // The mapping lives in code, so this only fails if the code itself is wrong.
+  const resolution = resolveEnvironment(environmentForDeviceUid(deviceUid));
+  if (!resolution.ok) {
+    console.error("Device report not routable:", resolution.error.details);
+    return accepted();
+  }
+  const { environment, table, schema } = resolution.value;
+
+  let rows;
+  try {
+    rows = rowsForSchema(schema, analysis, {
+      ip:
+        request.headers.get("x-forwarded-for") ||
+        request.headers.get("x-real-ip"),
+      userAgent: request.headers.get("user-agent"),
+    });
+  } catch (error) {
+    if (error instanceof PayloadInsertError) {
+      // The payload did decode, so the contract stays what it has always
+      // been: 204, with the reason in the server log.
+      console.error(`Payload not storable in ${table}:`, error.message);
+      return accepted();
+    }
+    throw error;
+  }
+
+  let supabase;
+  try {
+    supabase = createIngestClient();
+  } catch (error) {
+    console.error(
+      "Skipping payload storage:",
+      error instanceof Error ? error.message : "Unknown error",
+    );
+    return accepted();
+  }
+
+  const storing = ingestDeviceReport(supabase, {
+    environment,
+    table,
+    rows,
+    deviceUid,
+    receivedAt: new Date(),
+  });
+
+  const token = parseBearerToken(request.headers.get("authorization"));
+  after(async () => {
+    const outcome = await storing;
+    if (outcome.status !== "stored") {
+      console.warn(`Device report ${outcome.status} (${table}): ${outcome.reason}`);
+    }
+    // A device's report carries both its Bearer token and its UID: remember
+    // the pairing, so GET /api/config can tell which device is polling. Only
+    // the token's hash is stored, and this never throws.
+    if (token) await learnDeviceToken(supabase, token, deviceUid);
+  });
+
+  await settleWithin(storing, INLINE_STORE_BUDGET_MS);
+  return accepted();
 }
 
 /**

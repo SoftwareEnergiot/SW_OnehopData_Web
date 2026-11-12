@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import {
   Card,
   CardAction,
@@ -20,9 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { PayloadAnalysisView } from "@/components/payload-analysis";
-import { PayloadRecordView } from "@/components/payload-record-view";
-import { PayloadCharts } from "@/components/payload-charts";
+import { LazyMount } from "@/components/lazy-mount";
 import { PayloadCell, isNumericField } from "@/components/payload-cell";
 import { useActiveEnvironment } from "@/components/environment-provider";
 import { useSavedView } from "@/components/use-saved-view";
@@ -57,6 +56,29 @@ import {
 
 const PAGE_SIZES = [25, 50, 100, 200];
 
+// Loaded on demand, so the first paint ships only the table: the charts once
+// they are about to scroll into view, the inspectors once a row is opened.
+const PayloadCharts = dynamic(
+  () => import("@/components/payload-charts").then((m) => m.PayloadCharts),
+  { loading: () => <SectionPlaceholder label="Loading charts…" /> },
+);
+const PayloadAnalysisView = dynamic(
+  () => import("@/components/payload-analysis").then((m) => m.PayloadAnalysisView),
+  { loading: () => <SectionPlaceholder label="Loading inspector…" /> },
+);
+const PayloadRecordView = dynamic(
+  () => import("@/components/payload-record-view").then((m) => m.PayloadRecordView),
+  { loading: () => <SectionPlaceholder label="Loading inspector…" /> },
+);
+
+function SectionPlaceholder({ label }: { label: string }) {
+  return (
+    <div className="flex h-40 items-center justify-center rounded-xl border border-dashed text-sm text-muted-foreground">
+      {label}
+    </div>
+  );
+}
+
 // Rows pulled per request when gathering a full range for CSV export. Kept at
 // or below the Supabase default row cap so a single page never silently drops
 // rows off the end.
@@ -80,6 +102,9 @@ export function ReceivedPayloads() {
   const [rows, setRows] = useState<PayloadRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  // Set once the first page has arrived. The device list and the charts wait
+  // for it, so opening the dashboard starts one request instead of three.
+  const [firstPageLoaded, setFirstPageLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Received-timestamp range filter. Values come from <input type="datetime-local">,
   // i.e. wall-clock strings like "2026-07-06T14:30", read on the same clock as
@@ -138,6 +163,7 @@ export function ReceivedPayloads() {
       toast.error("Could not load stored payloads (is Supabase configured?)");
     } finally {
       setLoading(false);
+      setFirstPageLoaded(true);
     }
   }, [from, to, deviceUid, page, pageSize, environment.name]);
 
@@ -164,8 +190,8 @@ export function ReceivedPayloads() {
   }, [environment.name]);
 
   useEffect(() => {
-    fetchDevices();
-  }, [fetchDevices]);
+    if (firstPageLoaded) fetchDevices();
+  }, [fetchDevices, firstPageLoaded]);
 
   // A row's identity, read through the schema's primary key.
   const rowId = useCallback(
@@ -428,7 +454,12 @@ export function ReceivedPayloads() {
         </CardContent>
       </Card>
 
-      <PayloadCharts refreshKey={refreshKey} deviceUid={deviceUid} />
+      <LazyMount
+        ready={firstPageLoaded}
+        placeholder={<SectionPlaceholder label="Charts load after the table…" />}
+      >
+        <PayloadCharts refreshKey={refreshKey} deviceUid={deviceUid} />
+      </LazyMount>
 
       <Card>
         <CardHeader>

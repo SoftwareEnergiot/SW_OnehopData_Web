@@ -416,6 +416,57 @@ shown rather than swallowed behind a `204`. Naming an environment the
 application has no data source for is a `404` — never another environment's
 table.
 
+### Many devices at once: the ingest queue
+
+Devices report at the same instant and do not retry, so a device report never
+waits long for the database ([`lib/payload-ingest.ts`](lib/payload-ingest.ts)):
+
+1. **In-process queue.** Writes go through a FIFO limiter of
+   `MAX_CONCURRENT_WRITES` (4) per environment and server instance; a burst
+   waits its turn instead of opening a request per device. REE and Development
+   have separate limiters, so a Development burst never delays a REE write.
+2. **Inline, then background.** The device's `204` waits for its write at most
+   `INLINE_STORE_BUDGET_MS` (2 s); the rest finishes in `after()`. The device
+   token is learned only after the report is stored.
+3. **Retry queue.** A write the database rejects or does not answer within
+   `STORE_TIMEOUT_MS` is parked in `payload_ingest_queue`, rows ready to insert
+   and stamped with the reception time. A pg_cron job,
+   `drain_payload_ingest_queue()`, retries every minute, REE first, with a
+   backoff, and skips a report that turns out to be stored already. A REE job
+   never gives up; a Development one is marked `failed` after 50 attempts. A
+   job is never written to the other environment's table.
+4. **Last resort.** If the queue cannot be reached either, the full rows are
+   logged on one `INGEST_LOST` line for manual recovery.
+
+Dashboard writes (`?environment=`) are unchanged: synchronous, with their
+JSON answer.
+
+### Retention of Development payloads
+
+`prune_dev_payloads()` (pg_cron, every 10 minutes) keeps the database at 50 %
+of the plan's capacity by deleting the **oldest** `public.payloads` rows — a
+FIFO where new reports replace the oldest ones. The capacity, threshold and
+safety floor (`min_keep_rows`) are in `payload_retention_settings`. Postgres
+keeps deleted space for reuse rather than giving it back, so the function does
+not wait for the database size to drop: it computes how many Development rows
+fit in the budget left by everything else and deletes the excess.
+`public."payloads_REE"` is never pruned — REE grows into the budget and
+Development yields.
+
+### REE is isolated from Development
+
+- Routing is decided in code from the device UID, never from a database read.
+- A REE write never waits behind a Development write (separate limiters), and a
+  failed one stays in the retry queue until stored — never moved to `payloads`.
+- Retention only ever deletes from `public.payloads`.
+- `anon` and `authenticated` have no `UPDATE`, `DELETE` or `TRUNCATE` on
+  `payloads_REE`: the application only inserts and reads, so no bug in it can
+  change or remove a REE row.
+
+The SQL for the queue, the retention and the REE guard is
+`010_ingest_queue_retention_ree_guard.sql` (Supabase scripts). It is not
+deployment-order sensitive.
+
 ### Example (curl) — V1
 
 ```bash
@@ -514,6 +565,14 @@ It decodes like the V1 example, with `"payload_version": 2`,
 ```
 
 ---
+
+### Dashboard loading
+
+The dashboard loads in steps, so opening it starts one request instead of
+three: the table's first page first; then the device list, and the charts once
+they are about to scroll into view (`components/lazy-mount.tsx`). The charts,
+the payload inspectors, the Playground and the Remote config tab are split
+into their own chunks and downloaded only when shown.
 
 ## Remote config
 

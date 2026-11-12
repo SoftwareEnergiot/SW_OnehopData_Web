@@ -1,14 +1,28 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { PayloadPlayground } from "@/components/payload-playground";
 import { ReceivedPayloads } from "@/components/received-payloads";
-import { RemoteConfig } from "@/components/remote-config";
 import { UserMenu } from "@/components/user-menu";
 import { EnvironmentBadge } from "@/components/environment-selector";
 import { useActiveEnvironment } from "@/components/environment-provider";
 import { FlaskConical, Database, Settings2 } from "lucide-react";
 import Image from "next/image";
+
+// The secondary tabs load their code only when opened.
+function TabPlaceholder() {
+  return (
+    <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>
+  );
+}
+const PayloadPlayground = dynamic(
+  () => import("@/components/payload-playground").then((m) => m.PayloadPlayground),
+  { loading: TabPlaceholder },
+);
+const RemoteConfig = dynamic(
+  () => import("@/components/remote-config").then((m) => m.RemoteConfig),
+  { loading: TabPlaceholder },
+);
 
 export function PayloadDashboard() {
   // Guaranteed by <EnvironmentGuard>, which is what renders this dashboard.
