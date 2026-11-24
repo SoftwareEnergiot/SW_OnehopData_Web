@@ -112,9 +112,26 @@ interface PayloadChartsProps {
    * interleaves several devices would be meaningless. "" charts every device.
    */
   deviceUid: string;
+  /**
+   * The dashboard's received-timestamp range, shared with the table and the
+   * CSV export so all three always show the same slice. Wall-clock strings
+   * from <input type="datetime-local">, read on the same clock as the
+   * created_at timestamps they filter. "" leaves that end open.
+   */
+  from: string;
+  to: string;
+  onFromChange: (value: string) => void;
+  onToChange: (value: string) => void;
 }
 
-export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
+export function PayloadCharts({
+  refreshKey,
+  deviceUid,
+  from,
+  to,
+  onFromChange,
+  onToChange,
+}: PayloadChartsProps) {
   // Which dataset is charted, and what its columns mean. Guaranteed present:
   // this card only renders inside the environment guard.
   const { environment, schema } = useActiveEnvironment();
@@ -134,12 +151,6 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
   const [failed, setFailed] = useState(false);
   const [showValues, setShowValues] = useState(false);
   const [bucketMs, setBucketMs] = useState(DEFAULT_INTERVAL);
-  // The charts carry their own received-timestamp range, independent of the
-  // table's filter, so the reader can pan back over previous data on the charts
-  // alone. Values are wall-clock strings from <input type="datetime-local">,
-  // read on the same clock as the created_at timestamps they filter.
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
   const hasFilter = from !== "" || to !== "";
 
   // The range as ISO instants — the slice the timeline is drawn from.
@@ -283,8 +294,8 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
         </CardTitle>
         <CardAction>
           <div className="flex flex-wrap items-end justify-end gap-3">
-            {/* The charts' own range — pan back over previous data without
-                touching the table's filter below. */}
+            {/* The dashboard's range: it scopes these charts, the table of
+                payloads below and its CSV export alike. */}
             <div className="grid gap-1.5">
               <Label
                 htmlFor="chart-from"
@@ -297,7 +308,7 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
                 type="datetime-local"
                 value={from}
                 max={to || undefined}
-                onChange={(e) => setFrom(e.target.value)}
+                onChange={(e) => onFromChange(e.target.value)}
                 className="h-9 w-auto"
               />
             </div>
@@ -313,7 +324,7 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
                 type="datetime-local"
                 value={to}
                 min={from || undefined}
-                onChange={(e) => setTo(e.target.value)}
+                onChange={(e) => onToChange(e.target.value)}
                 className="h-9 w-auto"
               />
             </div>
@@ -322,8 +333,8 @@ export function PayloadCharts({ refreshKey, deviceUid }: PayloadChartsProps) {
                 variant="ghost"
                 size="sm"
                 onClick={() => {
-                  setFrom("");
-                  setTo("");
+                  onFromChange("");
+                  onToChange("");
                 }}
                 className="gap-1"
               >

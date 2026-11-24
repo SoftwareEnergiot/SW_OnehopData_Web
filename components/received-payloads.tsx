@@ -11,7 +11,6 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Table,
@@ -40,8 +39,8 @@ import type { PayloadRecord, PayloadRow } from "@/lib/types";
 // One entry of GET /api/payloads/devices.
 interface DeviceOption {
   device_uid: string;
-  payloads: number;
-  last_seen: string;
+  /** Null for a known device with no payload in this environment. */
+  last_seen: string | null;
 }
 import { toast } from "sonner";
 import {
@@ -118,7 +117,8 @@ export function ReceivedPayloads() {
   // for it, so opening the dashboard starts one request instead of three.
   const [firstPageLoaded, setFirstPageLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Received-timestamp range filter. Values come from <input type="datetime-local">,
+  // Received-timestamp range, shared by the charts (which render its inputs),
+  // the table and the CSV export. Values come from <input type="datetime-local">,
   // i.e. wall-clock strings like "2026-07-06T14:30", read on the same clock as
   // the created_at values shown in the table.
   const [from, setFrom] = useState("");
@@ -435,38 +435,11 @@ export function ReceivedPayloads() {
 
   return (
     <div className="space-y-6">
-      {/* This filter scopes the table below. The charts carry their own
-          independent time range so previous data can be viewed on them alone,
-          but they follow the device filter: mixing devices in one battery or
-          coverage line would be meaningless. */}
+      {/* The device filter scopes the charts and the table alike. The time
+          range is set on the Reception timeline card and scopes both too, so
+          the table always lists the payloads the charts are drawn from. */}
       <Card>
         <CardContent className="flex flex-wrap items-end gap-3">
-          <div className="grid gap-1.5">
-            <Label htmlFor="received-from" className="text-xs text-muted-foreground">
-              Received from
-            </Label>
-            <Input
-              id="received-from"
-              type="datetime-local"
-              value={from}
-              max={to || undefined}
-              onChange={(e) => changeFrom(e.target.value)}
-              className="w-auto"
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="received-to" className="text-xs text-muted-foreground">
-              Received to
-            </Label>
-            <Input
-              id="received-to"
-              type="datetime-local"
-              value={to}
-              min={from || undefined}
-              onChange={(e) => changeTo(e.target.value)}
-              className="w-auto"
-            />
-          </div>
           {schema.capabilities.deviceFilter && (
           <div className="grid gap-1.5">
             <Label htmlFor="device-uid" className="text-xs text-muted-foreground">
@@ -481,7 +454,10 @@ export function ReceivedPayloads() {
               <option value="">All devices</option>
               {devices.map((device) => (
                 <option key={device.device_uid} value={device.device_uid}>
-                  {device.device_uid} ({device.payloads})
+                  {device.device_uid} ·{" "}
+                  {device.last_seen
+                    ? `last seen ${formatCreatedAt(device.last_seen).slice(0, 16)}`
+                    : "no payloads"}
                 </option>
               ))}
               {/* V0 payloads carry no UID; offered only when some exist. */}
@@ -529,7 +505,14 @@ export function ReceivedPayloads() {
         ready={firstPageLoaded}
         placeholder={<SectionPlaceholder label="Charts load after the table…" />}
       >
-        <PayloadCharts refreshKey={refreshKey} deviceUid={deviceUid} />
+        <PayloadCharts
+          refreshKey={refreshKey}
+          deviceUid={deviceUid}
+          from={from}
+          to={to}
+          onFromChange={changeFrom}
+          onToChange={changeTo}
+        />
       </LazyMount>
 
       <Card>

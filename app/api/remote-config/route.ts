@@ -5,9 +5,9 @@ import {
   latestConfigReport,
   remoteConfigUnavailable,
   resolveEnvironment,
-  scanDevices,
 } from "@/lib/payload-repository";
 import { listDeviceConfigs } from "@/lib/device-config-store";
+import { listDevices } from "@/lib/device-list";
 import { normalizeDeviceUid } from "@/lib/payload-decoder";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -26,8 +26,8 @@ export const dynamic = "force-dynamic";
  * Development only: an environment whose schema does not offer remote config
  * (REE) answers 403.
  *
- * Response: `{ success, environment, table, truncated, devices: [{ device_uid,
- * stored_uid, payloads, last_seen, last_report, config }] }`, where
+ * Response: `{ success, environment, table, devices: [{ device_uid,
+ * stored_uid, last_seen, last_report, config }] }`, where
  * `device_uid` is the "00:12:4B:…" display form and `config` the saved
  * `device_config` row or null.
  */
@@ -58,7 +58,7 @@ export async function GET(request: NextRequest) {
 
     const supabase = await createClient();
     const [scan, configs] = await Promise.all([
-      scanDevices(supabase, table, schema),
+      listDevices(supabase, environment, table, schema),
       listDeviceConfigs(supabase),
     ]);
     const configByUid = new Map(configs.map((c) => [c.device_uid, c]));
@@ -69,7 +69,6 @@ export async function GET(request: NextRequest) {
         return {
           device_uid: normalizeDeviceUid(device.device_uid) ?? device.device_uid,
           stored_uid: device.device_uid,
-          payloads: device.payloads,
           last_seen: device.last_seen,
           last_report: await latestConfigReport(
             supabase,
@@ -86,7 +85,6 @@ export async function GET(request: NextRequest) {
       success: true,
       environment,
       table,
-      truncated: scan.truncated,
       devices,
     });
   } catch (error) {

@@ -71,8 +71,7 @@ interface DeviceRow {
   device_uid: string;
   /** The UID as the environment's table stores it. */
   stored_uid: string;
-  payloads: number;
-  last_seen: string;
+  last_seen: string | null;
   last_report: {
     received_at: string;
     config_crc32: number | null;
@@ -148,7 +147,6 @@ export function RemoteConfig() {
   const [devices, setDevices] = useState<DeviceRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [truncated, setTruncated] = useState(false);
 
   const [selectedUid, setSelectedUid] = useState("");
   const [version, setVersion] = useState<ConfigVersion>("v0");
@@ -181,7 +179,6 @@ export function RemoteConfig() {
       }
       setLoadError(null);
       setDevices(result.devices ?? []);
-      setTruncated(Boolean(result.truncated));
     } catch {
       setLoadError("Could not load remote configs (is Supabase configured?)");
     } finally {
@@ -601,7 +598,6 @@ export function RemoteConfig() {
             Every device that has reported to {environment.name}. Applied means
             the last payload&apos;s config CRC is the saved file&apos;s; a file that
             fails its trial is reverted (poll status 8) and shows as Pending again.
-            {truncated && " Only the most recent payloads were scanned; older devices may be missing."}
           </CardDescription>
         </CardHeader>
         <CardContent>

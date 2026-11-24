@@ -3,7 +3,8 @@ import {
   ENVIRONMENT_PARAM,
   INGEST_DEFAULT_ENVIRONMENT,
 } from "@/lib/environments";
-import { resolveEnvironment, scanDevices } from "@/lib/payload-repository";
+import { listDevices } from "@/lib/device-list";
+import { resolveEnvironment } from "@/lib/payload-repository";
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -12,17 +13,15 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/payloads/devices[?environment=<name>]
  *
- * The distinct device UIDs that have sent payloads in the selected
- * environment, most recently seen first — what the dashboard's device filter
- * offers. The UIDs come back in whatever form that environment's table stores
+ * The devices of the selected environment, most recently seen first — what
+ * the dashboard's device filter offers. They come from `device_api_key`, the
+ * table of known devices, split between environments by the same UID routing
+ * ingestion applies (lib/device-list `listDevices`). The UIDs come back in whatever form that environment's table stores
  * them (`payloads` keeps "00:12:4B:…", `payloads_REE` keeps unseparated hex),
  * so the value can be handed straight back as a filter.
  *
- * The scan itself (lib/payload-repository `scanDevices`) reads only the device
- * and timestamp columns, newest first. The partial index from scripts/003 keeps
- * that cheap.
- *
- * Response: `{ success, environment, table, devices: [{ device_uid, payloads, last_seen }], withoutUid, truncated }`.
+ * Response: `{ success, environment, table, devices: [{ device_uid, last_seen }], withoutUid }`,
+ * `last_seen` being null for a known device with no payload in this table.
  * `withoutUid` is true when at least one scanned payload has no UID (V0).
  */
 export async function GET(request: NextRequest) {
@@ -46,7 +45,7 @@ export async function GET(request: NextRequest) {
 
     let scan;
     try {
-      scan = await scanDevices(supabase, table, schema);
+      scan = await listDevices(supabase, environment, table, schema);
     } catch (error) {
       console.error("Database error:", error);
       return NextResponse.json(
